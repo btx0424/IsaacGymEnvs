@@ -38,6 +38,7 @@ from tasks.humanoid import Humanoid
 from tasks.humanoid_amp import HumanoidAMP
 from tasks.ingenuity import Ingenuity
 from tasks.quadcopter import Quadcopter
+from tasks.quadrotor import Quadrotor
 from tasks.shadow_hand import ShadowHand
 from tasks.trifinger import Trifinger
 
@@ -54,6 +55,7 @@ isaacgym_task_map = {
     "HumanoidAMP": HumanoidAMP,
     "Ingenuity": Ingenuity,
     "Quadcopter": Quadcopter,
+    "Quadrotor": Quadrotor,
     "ShadowHand": ShadowHand,
     "Trifinger": Trifinger,
 }

@@ -725,3 +725,29 @@ class VecTask(Env):
 
         self.first_randomization = False
 
+class MultiAgentVecTask(VecTask):
+    def __init__(self, config, sim_device, graphics_device_id, headless):
+        super().__init__(config, sim_device, graphics_device_id, headless)
+        
+        ones = np.ones((self.num_agents, self.num_obs))
+        self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
+        ones = np.ones((self.num_agents, self.num_actions))
+        self.act_space = spaces.Box(-ones, ones)
+        
+    def allocate_buffers(self):
+        # allocate buffers
+        self.obs_buf = torch.zeros(
+            (self.num_envs, self.num_agents, self.num_obs), device=self.device, dtype=torch.float)
+        self.states_buf = torch.zeros(
+            (self.num_envs, self.num_agents, self.num_states), device=self.device, dtype=torch.float)
+        self.rew_buf = torch.zeros(
+            (self.num_envs, self.num_agents), device=self.device, dtype=torch.float)
+        self.reset_buf = torch.ones(
+            (self.num_envs, self.num_agents), device=self.device, dtype=torch.long)
+        self.timeout_buf = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long)
+        self.progress_buf = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long)
+        self.randomize_buf = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long)
+        self.extras = {}
