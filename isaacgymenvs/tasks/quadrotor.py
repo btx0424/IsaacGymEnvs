@@ -9,16 +9,16 @@ import math
 import numpy as np
 from gym import spaces
 from xml.etree import ElementTree
-from utils.torch_jit_utils import torch_rand_float
+from isaacgymenvs.utils.torch_jit_utils import *
 
 class Quadrotor(MultiAgentVecTask):
-    def __init__(self, cfg, sim_device, graphics_device_id, headless):
+    def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         
         cfg["env"]["numObservations"] = 13
         cfg["env"]["numActions"] = 4
         
         self.cfg = cfg
-        super().__init__(cfg, sim_device, graphics_device_id, headless)
+        super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
         self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
         vec_root_tensor: torch.Tensor = gymtorch.wrap_tensor(self.root_tensor).view(self.num_envs, self.num_agents, 13)
@@ -47,7 +47,7 @@ class Quadrotor(MultiAgentVecTask):
 
         ones = np.ones(self.num_obs)
         self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
-        ones = np.ones(self.num_actions)
+        ones = np.ones(3)
         self.act_space = spaces.Box(-ones, ones)
 
     def create_sim(self):
@@ -177,8 +177,6 @@ class Quadrotor(MultiAgentVecTask):
         for tensor in obs.values():
             tensor.squeeze_()
         return obs
-
-from utils.torch_jit_utils import *
 
 @torch.jit.script
 def compute_quadcopter_reward(root_positions, root_quats, root_linvels, root_angvels, reset_buf, progress_buf, max_episode_length):

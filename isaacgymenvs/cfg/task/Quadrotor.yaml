@@ -9,7 +9,7 @@ env:
   envSpacing: 1.25
   maxEpisodeLength: 500
   enableDebugVis: False
-  controlFrequencyInv: 2
+  controlFrequencyInv: 1
 
   clipObservations: 5.0
   # clipActions: 1.0

@@ -6,17 +6,12 @@ from isaacgymenvs.tasks.quadrotor import Quadrotor
 import torch
 import time
 
-OmegaConf.register_new_resolver('eq', lambda x, y: x.lower()==y.lower())
-OmegaConf.register_new_resolver('contains', lambda x, y: x.lower() in y.lower())
-OmegaConf.register_new_resolver('if', lambda pred, a, b: a if pred else b)
-# allows us to resolve default arguments which are copied in multiple places in the config. used primarily for
-# num_ensv
-OmegaConf.register_new_resolver('resolve_default', lambda default, arg: default if arg=='' else arg)
-
 @hydra.main(config_path="./cfg", config_name="config")
 def test(config):
     OmegaConf.set_struct(config, False)
-    env = Quadrotor(config.task, config.sim_device, config.graphics_device_id, config.headless)
+    env = Quadrotor(
+        config.task, config.rl_device, config.sim_device, 
+        config.graphics_device_id, config.headless)
     env.reset()
     
     steps = 0

@@ -751,8 +751,8 @@ class VecTask(Env):
         self.first_randomization = False
 
 class MultiAgentVecTask(VecTask):
-    def __init__(self, config, sim_device, graphics_device_id, headless):
-        super().__init__(config, sim_device, graphics_device_id, headless)
+    def __init__(self, config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
+        super().__init__(config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         
         ones = np.ones((self.num_agents, self.num_obs))
         self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
