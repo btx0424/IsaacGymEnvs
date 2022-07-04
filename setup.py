@@ -19,8 +19,11 @@ INSTALL_REQUIRES = [
     "omegaconf",
     "termcolor",
     "hydra-core>=1.1",
-    "rl-games==1.1.4",
-]
+    "rl-games==1.5.2",
+    "pyvirtualdisplay",
+    ]
+
+
 
 # Installation operation
 setup(

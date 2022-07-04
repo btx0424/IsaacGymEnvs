@@ -39,16 +39,25 @@ import torch
 import numpy as np
 import operator, random
 from copy import deepcopy
-
 import sys
 
 import abc
 from abc import ABC
 
+EXISTING_SIM = None
+SCREEN_CAPTURE_RESOLUTION = (1027, 768)
+
+def _create_sim_once(gym, *args, **kwargs):
+    global EXISTING_SIM
+    if EXISTING_SIM is not None:
+        return EXISTING_SIM
+    else:
+        EXISTING_SIM = gym.create_sim(*args, **kwargs)
+        return EXISTING_SIM
 
 
 class Env(ABC):
-    def __init__(self, config: Dict[str, Any], sim_device: str, graphics_device_id: int,  headless: bool):
+    def __init__(self, config: Dict[str, Any], rl_device: str, sim_device: str, graphics_device_id: int, headless: bool):
         """Initialise the env.
 
         Args:
@@ -70,7 +79,7 @@ class Env(ABC):
                 print("GPU Pipeline can only be used with GPU simulation. Forcing CPU Pipeline.")
                 config["sim"]["use_gpu_pipeline"] = False
 
-        self.rl_device = config.get("rl_device", "cuda:0")
+        self.rl_device = rl_device
 
         # Rendering
         # if training in a headless mode
@@ -154,7 +163,9 @@ class Env(ABC):
 
 class VecTask(Env):
 
-    def __init__(self, config, sim_device, graphics_device_id, headless):
+    metadata = {"render.modes": ["human", "rgb_array"], "video.frames_per_second": 24}
+
+    def __init__(self, config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         """Initialise the `VecTask`.
 
         Args:
@@ -162,8 +173,17 @@ class VecTask(Env):
             sim_device: the device to simulate physics on. eg. 'cuda:0' or 'cpu'
             graphics_device_id: the device ID to render with.
             headless: Set to False to disable viewer rendering.
+            virtual_screen_capture: Set to True to allow the users get captured screen in RGB array via `env.render(mode='rgb_array')`. 
+            force_render: Set to True to always force rendering in the steps (if the `control_freq_inv` is greater than 1 we suggest stting this arg to True)
         """
-        super().__init__(config, sim_device, graphics_device_id, headless)
+        super().__init__(config, rl_device, sim_device, graphics_device_id, headless)
+        self.virtual_screen_capture = virtual_screen_capture
+        self.virtual_display = None
+        if self.virtual_screen_capture:
+            from pyvirtualdisplay.smartdisplay import SmartDisplay
+            self.virtual_display = SmartDisplay(size=SCREEN_CAPTURE_RESOLUTION)
+            self.virtual_display.start()
+        self.force_render = force_render
 
         self.sim_params = self.__parse_sim_params(self.cfg["physics_engine"], self.cfg["sim"])
         if self.cfg["physics_engine"] == "physx":
@@ -266,7 +286,7 @@ class VecTask(Env):
         Returns:
             the Isaac Gym sim object.
         """
-        sim = self.gym.create_sim(compute_device, graphics_device, physics_engine, sim_params)
+        sim = _create_sim_once(self.gym, compute_device, graphics_device, physics_engine, sim_params)
         if sim is None:
             print("*** Failed to create sim")
             quit()
@@ -274,7 +294,7 @@ class VecTask(Env):
         return sim
 
     def get_state(self):
-        """Returns the state buffer of the environment (the priviledged observations for asymmetric training)."""
+        """Returns the state buffer of the environment (the privileged observations for asymmetric training)."""
         return torch.clamp(self.states_buf, -self.clip_obs, self.clip_obs).to(self.rl_device)
 
     @abc.abstractmethod
@@ -309,18 +329,19 @@ class VecTask(Env):
 
         # step physics and render each frame
         for i in range(self.control_freq_inv):
-            self.render()
+            if self.force_render:
+                self.render()
             self.gym.simulate(self.sim)
 
         # to fix!
         if self.device == 'cpu':
             self.gym.fetch_results(self.sim, True)
 
-        # fill time out buffer
-        self.timeout_buf = torch.where(self.progress_buf >= self.max_episode_length - 1, torch.ones_like(self.timeout_buf), torch.zeros_like(self.timeout_buf))
-        
         # compute observations, rewards, resets, ...
         self.post_physics_step()
+
+        # fill time out buffer: set to 1 if we reached the max episode length AND the reset buffer is 1. Timeout == 1 makes sense only if the reset buffer is 1.
+        self.timeout_buf = (self.progress_buf >= self.max_episode_length - 1) & (self.reset_buf != 0)
 
         # randomize observations
         if self.dr_randomizations.get('observations', None):
@@ -383,7 +404,7 @@ class VecTask(Env):
 
         return self.obs_dict, done_env_ids
 
-    def render(self):
+    def render(self, mode="rgb_array"):
         """Draw the frame to the viewer, and check for keyboard events."""
         if self.viewer:
             # check for window closed
@@ -412,6 +433,10 @@ class VecTask(Env):
 
             else:
                 self.gym.poll_viewer_events(self.viewer)
+
+            if self.virtual_display and mode == "rgb_array":
+                img = self.virtual_display.grab()
+                return np.array(img)
 
     def __parse_sim_params(self, physics_engine: str, config_sim: Dict[str, Any]) -> gymapi.SimParams:
         """Parse the config dictionary for physics stepping settings.

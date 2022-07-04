@@ -1,9 +1,30 @@
-# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
-# NVIDIA CORPORATION and its licensors retain all intellectual property
-# and proprietary rights in and to this software, related documentation
-# and any modifications thereto.  Any use, reproduction, disclosure or
-# distribution of this software and related documentation without an express
-# license agreement from NVIDIA CORPORATION is strictly prohibited.
+# Copyright (c) 2021-2022, NVIDIA Corporation
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+# 1. Redistributions of source code must retain the above copyright notice, this
+#    list of conditions and the following disclaimer.
+#
+# 2. Redistributions in binary form must reproduce the above copyright notice,
+#    this list of conditions and the following disclaimer in the documentation
+#    and/or other materials provided with the distribution.
+#
+# 3. Neither the name of the copyright holder nor the names of its
+#    contributors may be used to endorse or promote products derived from
+#    this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+# AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+# IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+# FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+# DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+# OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+# OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE..
 
 from enum import Enum
 import numpy as np
@@ -15,9 +36,9 @@ from gym import spaces
 from isaacgym import gymapi
 from isaacgym import gymtorch
 
-from .amp.humanoid_amp_base import HumanoidAMPBase, dof_to_obs
-from .amp.utils_amp import gym_util
-from .amp.utils_amp.motion_lib import MotionLib
+from isaacgymenvs.tasks.amp.humanoid_amp_base import HumanoidAMPBase, dof_to_obs
+from isaacgymenvs.tasks.amp.utils_amp import gym_util
+from isaacgymenvs.tasks.amp.utils_amp.motion_lib import MotionLib
 
 from isaacgym.torch_utils import *
 from isaacgymenvs.utils.torch_jit_utils import *
@@ -34,7 +55,7 @@ class HumanoidAMP(HumanoidAMPBase):
         Random = 2
         Hybrid = 3
 
-    def __init__(self, cfg, sim_device, graphics_device_id, headless):
+    def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render):
         self.cfg = cfg
 
         state_init = cfg["env"]["stateInit"]
@@ -46,7 +67,7 @@ class HumanoidAMP(HumanoidAMPBase):
         self._reset_default_env_ids = []
         self._reset_ref_env_ids = []
 
-        super().__init__(config=self.cfg, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless)
+        super().__init__(config=self.cfg, rl_device=rl_device, sim_device=sim_device, graphics_device_id=graphics_device_id, headless=headless, virtual_screen_capture=virtual_screen_capture, force_render=force_render)
 
         motion_file = cfg['env'].get('motion_file', "amp_humanoid_backflip.npy")
         motion_file_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "../../assets/amp/motions/" + motion_file)

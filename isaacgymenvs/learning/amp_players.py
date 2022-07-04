@@ -32,16 +32,19 @@ from rl_games.algos_torch import torch_ext
 from rl_games.algos_torch.running_mean_std import RunningMeanStd
 from rl_games.common.player import BasePlayer
 
-import learning.common_player as common_player
+import isaacgymenvs.learning.common_player as common_player
 
 
 class AMPPlayerContinuous(common_player.CommonPlayer):
-    def __init__(self, config):
+
+    def __init__(self, params):
+        config = params['config']
+
         self._normalize_amp_input = config.get('normalize_amp_input', True)
         self._disc_reward_scale = config['disc_reward_scale']
         self._print_disc_prediction = config.get('print_disc_prediction', False)
         
-        super().__init__(config)
+        super().__init__(params)
         return
 
     def restore(self, fn):
