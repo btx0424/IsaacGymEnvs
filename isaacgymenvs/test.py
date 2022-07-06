@@ -25,7 +25,7 @@ def test(config):
         # ], device=env.device).view(4, 1, 3)
         actions = torch.rand((env.num_environments, env.num_agents, 3), device=env.device)
         obs, reward, done, info = env.step(actions)
-        # env.render()
+        env.render()
         steps += env.num_envs
         # if done.all():
         #     print(env.root_positions)

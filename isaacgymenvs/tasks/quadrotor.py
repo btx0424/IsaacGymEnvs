@@ -1,3 +1,4 @@
+from collections import defaultdict
 from math import sqrt
 
 from .base.vec_task import MultiAgentVecTask
@@ -10,26 +11,33 @@ import numpy as np
 from gym import spaces
 from xml.etree import ElementTree
 from isaacgymenvs.utils.torch_jit_utils import *
+from typing import Dict
 
 class Quadrotor(MultiAgentVecTask):
+    
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         
         cfg["env"]["numObservations"] = 13
         cfg["env"]["numActions"] = 4
         
         self.cfg = cfg
+        self.actor_types = ["drone", "box"]
+
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
-        self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
-        vec_root_tensor: torch.Tensor = gymtorch.wrap_tensor(self.root_tensor).view(self.num_envs, self.num_agents, 13)
+        self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim) # (actor_count, 3+4+3+3=13)
+
+        vec_root_tensor: torch.Tensor = gymtorch.wrap_tensor(self.root_tensor)
+        # TODO: replace it with the Omni Isaac gym api
         
-        self.root_states = vec_root_tensor
-        self.root_positions = vec_root_tensor[..., 0:3]
-        self.root_quats = vec_root_tensor[..., 3:7]
-        self.root_linvels = vec_root_tensor[..., 7:10]
-        self.root_angvels = vec_root_tensor[..., 10:13]
+        self.root_states = {actor_type: vec_root_tensor[self.root_index[actor_type]].view(self.num_envs, -1) for actor_type in self.actor_types}
+        self.root_positions = {actor_type: vec_root_tensor[self.root_index[actor_type]][..., :3].view(self.num_envs, -1) for actor_type in self.actor_types}
+        self.root_quats = {actor_type: vec_root_tensor[self.root_index[actor_type]][..., 3:7].view(self.num_envs, -1) for actor_type in self.actor_types}
+        self.root_linvels = {actor_type: vec_root_tensor[self.root_index[actor_type]][..., 7:10].view(self.num_envs, -1) for actor_type in self.actor_types}
+        self.root_angvels = {actor_type: vec_root_tensor[self.root_index[actor_type]][..., 10:13].view(self.num_envs, -1) for actor_type in self.actor_types}
+
         self.gym.refresh_actor_root_state_tensor(self.sim)
-        self.initial_root_states = vec_root_tensor.clone()
+        self.initial_root_states = self.root_states["drone"].clone()
 
         bodies_per_env = self.gym.get_env_rigid_body_count(self.envs[0])
         self.forces = torch.zeros(
@@ -37,8 +45,6 @@ class Quadrotor(MultiAgentVecTask):
         self.z_torques = torch.zeros(
             (self.num_envs, bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
         self.max_episode_length = self.cfg["env"]["maxEpisodeLength"]
-
-        self.all_actor_indices = torch.arange(self.num_envs, dtype=torch.int32, device=self.device)
 
         if self.viewer:
             cam_pos = gymapi.Vec3(1.0, 1.0, 1.8)
@@ -71,34 +77,57 @@ class Quadrotor(MultiAgentVecTask):
         self.HOVER_RPM = sqrt(9.81 / (4*self.KF))
         self.TIME_STEP = self.sim_params.dt
         asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
+        
+        asset_options = gymapi.AssetOptions()
+        asset_options.fix_base_link = True
+        box_asset = self.gym.create_box(self.sim, 0.1, 0.1, 0.5, asset_options)
 
         plane_params = gymapi.PlaneParams()
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
         self.gym.add_ground(self.sim, plane_params)
 
         self.envs = []
-        default_pose = gymapi.Transform()
-        default_pose.p.z = 0.5
         spacing = self.cfg["env"]["envSpacing"]
         lower = gymapi.Vec3(-spacing, -spacing, 0.0)
         upper = gymapi.Vec3(spacing, spacing, spacing)
         num_per_row = int(sqrt(self.num_envs))
+
+        drone_pose = gymapi.Transform()
+        box_pose = gymapi.Transform()
+
+        root_index = defaultdict(lambda: [])
         for i_env in range(self.num_envs):
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
+            drone_index_env = []
+            drone_pose.p = gymapi.Vec3(0.0, 0.0, 0.5)
+
             for i_agent in range(self.num_agents):
-                self.gym.create_actor(env, asset, default_pose, "cf2x", i_env, 0)
+                actor_handle = self.gym.create_actor(env, asset, drone_pose, "cf2x", i_env, 0)
+                drone_index_env.append(self.gym.get_actor_index(env, actor_handle, gymapi.DOMAIN_SIM))
+                drone_pose.p.x += 0.1
+                drone_pose.p.z += 0.1
+            
+            box_index_env = []
+            for i_box, center in enumerate([[-1, 1, 0.5]]):
+                box_pose.p = gymapi.Vec3(*center)
+                actor_handle = self.gym.create_actor(env, box_asset, box_pose, "box", i_env, 0) 
+                box_index_env.append(self.gym.get_actor_index(env, actor_handle, gymapi.DOMAIN_SIM))
+
             self.envs.append(env)
+            root_index["drone"].append(drone_index_env)
+            root_index["box"].append(box_index_env)
+
+        
+        self.root_index = {actor_type: torch.tensor(indices, device=self.device) for actor_type, indices in root_index.items()}
+
         self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
 
     def reset_idx(self, env_ids):
         num_resets = len(env_ids)
-        actor_indices = self.all_actor_indices[env_ids].flatten()
 
-        self.root_states[env_ids] = self.initial_root_states[env_ids]
-        self.root_states[env_ids, 0, 0] += torch_rand_float(-1.5, 1.5, (num_resets, 1), self.device).flatten()
-        self.root_states[env_ids, 0, 1] += torch_rand_float(-1.5, 1.5, (num_resets, 1), self.device).flatten()
-        self.root_states[env_ids, 0, 2] += torch_rand_float(-0.2, 1.5, (num_resets, 1), self.device).flatten()
-        self.gym.set_actor_root_state_tensor_indexed(self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_indices), num_resets)
+        self.root_states["drone"][env_ids] = self.initial_root_states[env_ids]
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim, self.root_tensor, gymtorch.unwrap_tensor(self.root_index["drone"].flatten().to(torch.int32)), num_resets)
 
         self.reset_buf[env_ids] = 0
         self.progress_buf[env_ids] = 0
@@ -132,23 +161,19 @@ class Quadrotor(MultiAgentVecTask):
         self.compute_reward()
     
     def compute_observations(self):
-        target_x = 0.0
-        target_y = 0.0
-        target_z = 1.0
-        self.obs_buf[..., 0] = (target_x - self.root_positions[..., 0]) / 3
-        self.obs_buf[..., 1] = (target_y - self.root_positions[..., 1]) / 3
-        self.obs_buf[..., 2] = (target_z - self.root_positions[..., 2]) / 3
-        self.obs_buf[..., 3:7] = self.root_quats
-        self.obs_buf[..., 7:10] = self.root_linvels / 2
-        self.obs_buf[..., 10:13] = self.root_angvels / math.pi
+        target = torch.tensor([0., 0., 1.], device=self.device)
+        self.obs_buf[..., :3] = (target - self.root_positions["drone"].view(self.num_envs, self.num_agents, 3))
+        self.obs_buf[..., 3:7] = self.root_quats["drone"].view(self.num_envs, self.num_agents, 4)
+        self.obs_buf[..., 7:10] = self.root_linvels["drone"].view(self.num_envs, self.num_agents, 3) / 2.
+        self.obs_buf[..., 10:13] = self.root_angvels["drone"].view(self.num_envs, self.num_agents, 3) / math.pi
         return self.obs_buf
 
     def compute_reward(self):
         self.rew_buf[:], self.reset_buf[:] = compute_quadcopter_reward(
-            self.root_positions,
-            self.root_quats,
-            self.root_linvels,
-            self.root_angvels,
+            self.root_positions["drone"].view(self.num_envs, self.num_agents, 3),
+            self.root_quats["drone"].view(self.num_envs, self.num_agents, 4),
+            self.root_linvels["drone"].view(self.num_envs, self.num_agents, 3),
+            self.root_angvels["drone"].view(self.num_envs, self.num_agents, 3),
             self.reset_buf, self.progress_buf, self.max_episode_length
         )
 
@@ -156,16 +181,16 @@ class Quadrotor(MultiAgentVecTask):
         target_pos = actions
         actions = self.controller.compute_control(
                 self.TIME_STEP,
-                self.root_positions.flatten(end_dim=-2),
-                self.root_quats.flatten(end_dim=-2),
-                self.root_linvels.flatten(end_dim=-2),
-                self.root_angvels.flatten(end_dim=-2),
+                self.root_positions["drone"].flatten(end_dim=-2),
+                self.root_quats["drone"].flatten(end_dim=-2),
+                self.root_linvels["drone"].flatten(end_dim=-2),
+                self.root_angvels["drone"].flatten(end_dim=-2),
                 target_pos.flatten(end_dim=-2),
                 torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
                 torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
                 torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
         )[0].view(self.num_envs, self.num_agents, 4)
-
+        print(actions)
         obs, reward, done, info = super().step(actions)
         for tensor in obs.values():
             tensor.squeeze_()
@@ -202,10 +227,6 @@ def compute_quadcopter_reward(root_positions, root_quats, root_linvels, root_ang
     reward = pos_reward + pos_reward * (up_reward + spinnage_reward)
 
     # resets due to misbehavior
-    # reset = torch.zeros_like(reset_buf)
-    # reset[progress_buf >= max_episode_length-1] = 1
-
-    # resets due to misbehavior
     ones = torch.ones_like(reset_buf.squeeze())
     die = torch.zeros_like(reset_buf.squeeze())
     die = torch.where(target_dist.squeeze() > 3.0, ones, die)
@@ -219,6 +240,9 @@ def compute_quadcopter_reward(root_positions, root_quats, root_linvels, root_ang
 from .utils import *
 
 class DSLPIDControl:
+    """
+    TODO: @ Botian: completely test the functionality of this controller...
+    """
     def __init__(self, n, sim_params: gymapi.SimParams, kf, device="cpu") -> None:
         self.device = device
         self.P_COEFF_FOR = torch.tensor([.4, .4, 1.25], device=device)
