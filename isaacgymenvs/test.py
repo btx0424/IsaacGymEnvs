@@ -16,14 +16,16 @@ def test(config):
     
     steps = 0
     time_start = time.perf_counter()
+
+    actions = torch.tensor([[
+        [0.0, 0.3, 1.0],
+        [0.1, 0.0, 0.2],
+        [-.5, 0.0, 1.2],
+        [-.1, 0.6, 0.8]
+        ]], device=env.device).view(4, 1, 3)
+    # actions = torch.rand((env.num_environments, env.num_agents, 3), device=env.device)
+    print(actions)
     while True:
-        # actions = torch.tensor([
-        #     [0.0, 0.3, 1.0],
-        #     [0.1, 0.0, 0.2],
-        #     [-.5, 0.0, 1.2],
-        #     [-.1, 0.6, 0.8]
-        # ], device=env.device).view(4, 1, 3)
-        actions = torch.rand((env.num_environments, env.num_agents, 3), device=env.device)
         obs, reward, done, info = env.step(actions)
         env.render()
         steps += env.num_envs

@@ -1,5 +1,6 @@
 from collections import defaultdict
 from math import sqrt
+from textwrap import indent
 
 from .base.vec_task import MultiAgentVecTask
 from isaacgym import gymapi, gymtorch, gymutil
@@ -21,29 +22,40 @@ class Quadrotor(MultiAgentVecTask):
         cfg["env"]["numActions"] = 4
         
         self.cfg = cfg
-        self.actor_types = ["drone", "box"]
+        self.actor_types = ["drone"]
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
-        self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim) # (actor_count, 3+4+3+3=13)
-
+        self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim) 
         vec_root_tensor: torch.Tensor = gymtorch.wrap_tensor(self.root_tensor)
+        vec_root_tensor = vec_root_tensor.view(self.num_envs, self.actors_per_env, 13) # (num_envs, env_actor_count, 13)
+        
+        print("root_tensor shape:", vec_root_tensor.shape)
+        for name, index in self.env_actor_index.items():
+            print(name, index)
+        for name, index in self.env_body_index.items():
+            print(name, index)
+
         # TODO: replace it with the Omni Isaac gym api
         
-        self.root_states = {actor_type: vec_root_tensor[self.root_index[actor_type]].view(self.num_envs, -1) for actor_type in self.actor_types}
-        self.root_positions = {actor_type: vec_root_tensor[self.root_index[actor_type]][..., :3].view(self.num_envs, -1) for actor_type in self.actor_types}
-        self.root_quats = {actor_type: vec_root_tensor[self.root_index[actor_type]][..., 3:7].view(self.num_envs, -1) for actor_type in self.actor_types}
-        self.root_linvels = {actor_type: vec_root_tensor[self.root_index[actor_type]][..., 7:10].view(self.num_envs, -1) for actor_type in self.actor_types}
-        self.root_angvels = {actor_type: vec_root_tensor[self.root_index[actor_type]][..., 10:13].view(self.num_envs, -1) for actor_type in self.actor_types}
+        self.root_states = {
+            actor_type: vec_root_tensor[:, self.env_actor_index[actor_type]] for actor_type in self.actor_types}
+        self.root_positions = {
+            actor_type: vec_root_tensor[:, self.env_actor_index[actor_type]][..., :3] for actor_type in self.actor_types}
+        self.root_quats = {
+            actor_type: vec_root_tensor[:, self.env_actor_index[actor_type]][..., 3:7] for actor_type in self.actor_types}
+        self.root_linvels = {
+            actor_type: vec_root_tensor[:, self.env_actor_index[actor_type]][..., 7:10] for actor_type in self.actor_types}
+        self.root_angvels = {
+            actor_type: vec_root_tensor[:, self.env_actor_index[actor_type]][..., 10:13] for actor_type in self.actor_types}
 
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.initial_root_states = self.root_states["drone"].clone()
 
-        bodies_per_env = self.gym.get_env_rigid_body_count(self.envs[0])
         self.forces = torch.zeros(
-            (self.num_envs, bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
+            (self.num_envs, self.bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
         self.z_torques = torch.zeros(
-            (self.num_envs, bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
+            (self.num_envs, self.bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
         self.max_episode_length = self.cfg["env"]["maxEpisodeLength"]
 
         if self.viewer:
@@ -66,7 +78,7 @@ class Quadrotor(MultiAgentVecTask):
             self.device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         assert self.sim is not None
         asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../assets')
-        asset_file = "urdf/cf2x.urdf"
+        asset_file = "urdf/quadrotor/cf2x.urdf"
         asset_urdf_tree = ElementTree.parse(os.path.join(asset_root, asset_file)).getroot()
         self.KF = float(asset_urdf_tree[0].attrib['kf'])
         self.KM = float(asset_urdf_tree[0].attrib['km'])
@@ -95,30 +107,40 @@ class Quadrotor(MultiAgentVecTask):
         drone_pose = gymapi.Transform()
         box_pose = gymapi.Transform()
 
-        root_index = defaultdict(lambda: [])
+        env_actor_index = defaultdict(lambda:[])
+        env_body_index = defaultdict(lambda:[])
+        sim_root_index = []
+
         for i_env in range(self.num_envs):
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
-            drone_index_env = []
             drone_pose.p = gymapi.Vec3(0.0, 0.0, 0.5)
 
             for i_agent in range(self.num_agents):
-                actor_handle = self.gym.create_actor(env, asset, drone_pose, "cf2x", i_env, 0)
-                drone_index_env.append(self.gym.get_actor_index(env, actor_handle, gymapi.DOMAIN_SIM))
+                drone_handle = self.gym.create_actor(env, asset, drone_pose, f"cf2x_{i_agent}", i_env, 0)
                 drone_pose.p.x += 0.1
                 drone_pose.p.z += 0.1
-            
-            box_index_env = []
-            for i_box, center in enumerate([[-1, 1, 0.5]]):
-                box_pose.p = gymapi.Vec3(*center)
-                actor_handle = self.gym.create_actor(env, box_asset, box_pose, "box", i_env, 0) 
-                box_index_env.append(self.gym.get_actor_index(env, actor_handle, gymapi.DOMAIN_SIM))
+                if i_env == 0:
+                    env_actor_index["drone"].append(
+                        self.gym.get_actor_index(env, drone_handle, gymapi.DOMAIN_ENV))
+                    env_body_index["prop"].extend([
+                        self.gym.get_actor_rigid_body_index(env, drone_handle, body_index, gymapi.DOMAIN_ENV) 
+                        for body_index in [2, 3, 4, 5]])
+                    env_body_index["base"].append(
+                        self.gym.get_actor_rigid_body_index(env, drone_handle, 0, gymapi.DOMAIN_ENV))
+                sim_root_index.append(self.gym.get_actor_index(env, drone_handle, gymapi.DOMAIN_SIM))
 
-            self.envs.append(env)
-            root_index["drone"].append(drone_index_env)
-            root_index["box"].append(box_index_env)
-
-        
-        self.root_index = {actor_type: torch.tensor(indices, device=self.device) for actor_type, indices in root_index.items()}
+            # for i_box, center in enumerate([[-1, 1, 0.]]):
+            #     box_pose.p = gymapi.Vec3(*center)
+            #     box_handle = self.gym.create_actor(env, box_asset, box_pose, f"box_{i_box}", i_env, 0) 
+            #     if i_env == 0:
+            #         env_actor_index["box"].append(
+            #             self.gym.get_actor_index(env, box_handle, gymapi.DOMAIN_ENV))
+            #     sim_root_index.append(self.gym.get_actor_index(env, box_handle, gymapi.DOMAIN_SIM))
+        self.env_actor_index = {name: torch.tensor(index) for name, index in env_actor_index.items()}
+        self.env_body_index = {name: torch.tensor(index) for name, index in env_body_index.items()}
+        self.bodies_per_env = self.gym.get_env_rigid_body_count(env)
+        self.actors_per_env = self.gym.get_actor_count(env)
+        self.sim_root_index = torch.tensor(sim_root_index, dtype=torch.int32, device=self.device).reshape(self.num_envs, self.actors_per_env)
 
         self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
 
@@ -127,10 +149,10 @@ class Quadrotor(MultiAgentVecTask):
 
         self.root_states["drone"][env_ids] = self.initial_root_states[env_ids]
         self.gym.set_actor_root_state_tensor_indexed(
-            self.sim, self.root_tensor, gymtorch.unwrap_tensor(self.root_index["drone"].flatten().to(torch.int32)), num_resets)
+            self.sim, self.root_tensor, gymtorch.unwrap_tensor(self.sim_root_index[env_ids].flatten()), num_resets)
 
-        self.reset_buf[env_ids] = 0
-        self.progress_buf[env_ids] = 0
+        self.reset_buf[env_ids].zero_()
+        self.progress_buf[env_ids].zero_()
         self.controller.reset_idx(env_ids)
 
     def pre_physics_step(self, actions: torch.Tensor):
@@ -138,17 +160,18 @@ class Quadrotor(MultiAgentVecTask):
         reset_env_ids = self.reset_buf.all(-1).nonzero(as_tuple=False).squeeze(-1)
         if len(reset_env_ids) > 0:
             self.reset_idx(reset_env_ids)
-        actions = actions.to(self.device).flatten(-2)
+        actions = actions.to(self.device)
 
         # rpms = self.HOVER_RPM * (1+0.05*actions)
         rpms = actions
-
-        self.forces[..., 2:6, 2] = rpms**2 * self.KF
+        forces = rpms**2 * self.KF # (env, actor, 4)
         torques = rpms**2 * self.KM
+        z_torques = (-torques[..., 0] + torques[..., 1] - torques[..., 2] + torques[..., 3]) # (env, actor)
 
-        self.z_torques[..., 0, 2] = (-torques[..., 0] + torques[..., 1] - torques[..., 2] + torques[..., 3])
-        self.forces[reset_env_ids] = 0
-        self.forces[reset_env_ids] = 0
+        self.forces[..., self.env_body_index["prop"], 2] = forces.flatten(start_dim=1)
+        self.z_torques[..., self.env_body_index["base"], 2] = z_torques.flatten(start_dim=1)
+        self.forces[reset_env_ids].zero_()
+        self.z_torques[reset_env_ids].zero_()
 
         self.gym.apply_rigid_body_force_tensors(self.sim, 
             gymtorch.unwrap_tensor(self.forces), 
@@ -162,10 +185,10 @@ class Quadrotor(MultiAgentVecTask):
     
     def compute_observations(self):
         target = torch.tensor([0., 0., 1.], device=self.device)
-        self.obs_buf[..., :3] = (target - self.root_positions["drone"].view(self.num_envs, self.num_agents, 3))
-        self.obs_buf[..., 3:7] = self.root_quats["drone"].view(self.num_envs, self.num_agents, 4)
-        self.obs_buf[..., 7:10] = self.root_linvels["drone"].view(self.num_envs, self.num_agents, 3) / 2.
-        self.obs_buf[..., 10:13] = self.root_angvels["drone"].view(self.num_envs, self.num_agents, 3) / math.pi
+        self.obs_buf[..., :3] = (target - self.root_positions["drone"])
+        self.obs_buf[..., 3:7] = self.root_quats["drone"]
+        self.obs_buf[..., 7:10] = self.root_linvels["drone"] / 2.
+        self.obs_buf[..., 10:13] = self.root_angvels["drone"] / math.pi
         return self.obs_buf
 
     def compute_reward(self):
@@ -190,7 +213,7 @@ class Quadrotor(MultiAgentVecTask):
                 torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
                 torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
         )[0].view(self.num_envs, self.num_agents, 4)
-        print(actions)
+        # print(actions)
         obs, reward, done, info = super().step(actions)
         for tensor in obs.values():
             tensor.squeeze_()
@@ -214,9 +237,9 @@ def compute_quadcopter_reward(root_positions, root_quats, root_linvels, root_ang
     pos_reward = 1.0 / (1.0 + target_dist * target_dist)
 
     # uprightness
-    ups = quat_axis(root_quats.squeeze(), 2)
-    tiltage = torch.abs(1 - ups[..., 2])
-    up_reward = (1.0 / (1.0 + tiltage * tiltage)).unsqueeze(1)
+    # ups = quat_axis(root_quats.squeeze(), 2)
+    # tiltage = torch.abs(1 - ups[..., 2])
+    # up_reward = (1.0 / (1.0 + tiltage * tiltage)).unsqueeze(1)
 
     # spinning
     spinnage = torch.abs(root_angvels[..., 2])
@@ -224,16 +247,15 @@ def compute_quadcopter_reward(root_positions, root_quats, root_linvels, root_ang
 
     # combined reward
     # uprigness and spinning only matter when close to the target
-    reward = pos_reward + pos_reward * (up_reward + spinnage_reward)
+    reward = pos_reward + pos_reward * (spinnage_reward)
 
     # resets due to misbehavior
-    ones = torch.ones_like(reset_buf.squeeze())
-    die = torch.zeros_like(reset_buf.squeeze())
-    die = torch.where(target_dist.squeeze() > 3.0, ones, die)
-    die = torch.where(root_positions[..., 2].squeeze() < 0.1, ones, die)
+    reset = torch.zeros_like(reset_buf)
+    reset[target_dist > 3] = 1
+    reset[root_positions[..., 2] < 0.1] = 1
 
     # resets due to episode length
-    reset = torch.where(progress_buf >= max_episode_length - 1, ones, die).unsqueeze(1)
+    reset[progress_buf >= max_episode_length - 1] = 1
     
     return reward, reset
 

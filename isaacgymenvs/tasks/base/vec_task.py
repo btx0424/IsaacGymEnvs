@@ -341,7 +341,7 @@ class VecTask(Env):
         self.post_physics_step()
 
         # fill time out buffer: set to 1 if we reached the max episode length AND the reset buffer is 1. Timeout == 1 makes sense only if the reset buffer is 1.
-        self.timeout_buf = (self.progress_buf >= self.max_episode_length - 1) & (self.reset_buf != 0)
+        # self.timeout_buf = (self.progress_buf >= self.max_episode_length - 1) & (self.reset_buf != 0)
 
         # randomize observations
         if self.dr_randomizations.get('observations', None):
