@@ -215,20 +215,21 @@ class Quadrotor(MultiAgentVecTask):
             .reshape(-1, 13) \
             .split_with_sizes((3, 4, 3, 3), dim=-1)
         actions = self.controller.compute_control(
-                self.TIME_STEP,
-                pos, quat, vel, angvel,
-                target_pos.reshape(-1, 3),
-                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+            self.TIME_STEP,
+            pos, quat, vel, angvel,
+            target_pos.reshape(-1, 3),
+            torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+            torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+            torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
         )[0].view(self.num_envs, self.num_agents, 4)
         obs_dict, reward, done, info = super().step(actions)
-        return obs_dict["obs"], reward.clone(), done, info
+        return obs_dict["obs"].squeeze(), reward.clone().squeeze(), done.squeeze(), info
+        return obs_dict["obs"], reward, done, info
     
     def reset(self):
         self.controller.reset()
         obs_dict = super().reset()
-        return obs_dict["obs"]
+        return obs_dict["obs"].squeeze()
 
     def refresh_tensors(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)

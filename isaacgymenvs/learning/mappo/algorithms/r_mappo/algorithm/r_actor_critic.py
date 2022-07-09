@@ -5,14 +5,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from onpolicy.algorithms.utils.util import init, check
-from onpolicy.algorithms.utils.cnn import CNNBase
-from onpolicy.algorithms.utils.mlp import MLPBase, MLPLayer
-from onpolicy.algorithms.utils.mix import MIXBase
-from onpolicy.algorithms.utils.rnn import RNNLayer
-from onpolicy.algorithms.utils.act import ACTLayer
-from onpolicy.algorithms.utils.popart import PopArt
-from onpolicy.utils.util import get_shape_from_obs_space
+from isaacgymenvs.learning.mappo.algorithms.utils.util import init, check
+from isaacgymenvs.learning.mappo.algorithms.utils.cnn import CNNBase
+from isaacgymenvs.learning.mappo.algorithms.utils.mlp import MLPBase, MLPLayer
+from isaacgymenvs.learning.mappo.algorithms.utils.mix import MIXBase
+from isaacgymenvs.learning.mappo.algorithms.utils.rnn import RNNLayer
+from isaacgymenvs.learning.mappo.algorithms.utils.act import ACTLayer
+from isaacgymenvs.learning.mappo.algorithms.utils.popart import PopArt
+from isaacgymenvs.learning.mappo.utils.util import get_shape_from_obs_space
 
 class R_Actor(nn.Module):
     def __init__(self, args, obs_space, action_space, device=torch.device("cpu")):

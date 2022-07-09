@@ -49,7 +49,7 @@ params:
   entropy_coef: 0.01
   env_name: StarCraft2
   episode_len_sec: 15
-  episode_length: 200
+  episode_length: 400
   episodes_per_update: 4
   eval_episodes: 32
   eval_interval: 25
@@ -76,7 +76,7 @@ params:
   n_render_rollout_threads: 1
   n_rollout_threads: ${task.env.numEnvs}
   n_training_threads: 1
-  num_env_steps: 10000000.0
+  num_env_steps: 500000000.0
   num_mini_batch: 1
   num_predators: 2
   num_preys: 1

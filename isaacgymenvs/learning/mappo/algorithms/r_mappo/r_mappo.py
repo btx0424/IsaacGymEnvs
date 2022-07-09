@@ -8,7 +8,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 
 from onpolicy.utils.util import get_gard_norm, huber_loss, mse_loss
-from onpolicy.utils.valuenorm import ValueNorm
+from isaacgymenvs.learning.mappo.utils.valuenorm import ValueNorm
 from onpolicy.algorithms.utils.util import check
 
 class R_MAPPO():
