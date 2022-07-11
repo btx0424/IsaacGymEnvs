@@ -9,7 +9,7 @@ params:
 
   network:
     name: actor_critic
-    separate: False
+    separate: True
     space:
       continuous:
         mu_activation: None
@@ -43,6 +43,7 @@ params:
     normalize_input: True
     normalize_value: True
     num_actors: ${....task.env.numEnvs}
+    num_agents: ${....task.env.numAgents}
     reward_shaper:
       scale_value: 0.1
     normalize_advantage: True

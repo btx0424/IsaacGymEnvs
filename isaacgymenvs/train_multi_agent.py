@@ -28,6 +28,7 @@ def main(cfg):
     env.obs_space = [env.obs_space] * env.num_agents
     env.act_space = [env.act_space] * env.num_agents
     env.share_observation_space = env.obs_space
+    print(env)
 
     config = {
         "all_args": cfg.params,

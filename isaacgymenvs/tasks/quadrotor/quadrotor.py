@@ -1,17 +1,16 @@
-from collections import defaultdict
-
-from .base.vec_task import MultiAgentVecTask
-from isaacgym import gymapi, gymtorch, gymutil
-
 import torch
 import os
 import math
 import numpy as np
+
+from isaacgym import gymapi, gymtorch, gymutil
 from gym import spaces
 from xml.etree import ElementTree
-from isaacgymenvs.utils.torch_jit_utils import *
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Any
 from torch import Tensor
+from collections import defaultdict
+from .controller import DSLPIDControl
+from ..base.vec_task import MultiAgentVecTask
 
 class Quadrotor(MultiAgentVecTask):
     
@@ -22,6 +21,13 @@ class Quadrotor(MultiAgentVecTask):
         
         self.cfg = cfg
         self.actor_types = ["drone", "box"]
+        self.boxes = [
+            (-1, 1, 0.5, 0.1, 0.1, 1.),
+            (1, 1, 0.5, 0.1, 0.1, 1.),
+            (1, -1, 0.5, 0.1, 0.1, 1.),
+            (-1, -1, 0.5, .1, 0.1, 1.)]
+        # self.num_drones = cfg["env"]["numDrones"]
+        self.num_boxes = len(self.boxes)
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
@@ -31,15 +37,9 @@ class Quadrotor(MultiAgentVecTask):
 
         vec_root_tensor: Tensor = gymtorch.wrap_tensor(self.root_tensor)
         vec_root_tensor = vec_root_tensor.view(self.num_envs, self.actors_per_env, 13) # (num_envs, env_actor_count, 13)
-        
-        print("root_tensor shape:", vec_root_tensor.shape)
-        for name, index in self.env_actor_index.items():
-            print(name, index)
-        for name, index in self.env_body_index.items():
-            print(name, index)
 
-        # TODO: replace it with the Omni Isaac gym api
-        
+        # TODO: replace it with the Omni Isaac gym api!
+    
         self.root_states = vec_root_tensor
         self.root_positions = vec_root_tensor[..., 0:3]
         self.root_quats = vec_root_tensor[..., 3:7]
@@ -48,8 +48,7 @@ class Quadrotor(MultiAgentVecTask):
         self.contact_forces: Tensor = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, self.bodies_per_env, 3)
         
         self.initial_root_states = self.root_states.clone()
-        self.targets = self.root_positions[:, self.env_actor_index["drone"]].clone()
-        self.targets[..., 2] += 0.5
+        self.box_states = torch.tensor(self.boxes, dtype=torch.float32, device=self.device)
 
         self.forces = torch.zeros(
             (self.num_envs, self.bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
@@ -62,10 +61,57 @@ class Quadrotor(MultiAgentVecTask):
             cam_target = gymapi.Vec3(2.2, 2.0, 1.0)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
-        ones = np.ones(self.num_obs)
+        # TODO: 
+        # 1. think of a better way to allocate buffers & set spaces
+        # 2. do we really need a buffer? test performance on this
+        # 3. where to do normalization ...
+
+        # MLP obs without obstacles
+        # ones = np.ones(13 * self.num_agents + self.num_agents)
+        # self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
+        # def obs_processor(obs_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
+        #     obs = obs_dict["obs"]
+        #     assert obs.shape == torch.Size((self.num_envs, self.num_agents, 13))
+        #     states = obs.view(self.num_envs, 1, -1).expand(-1, self.num_agents, -1)
+        #     identity = torch.eye(self.num_agents, device=obs.device).expand(self.num_envs, -1, -1)
+        #     obs_dict["obs"] = torch.cat([states, identity], dim=-1)
+        #     return obs_dict
+        # self.obs_processor = obs_processor
+
+        # attention obs with obstacles
+        # maybe a dict is better?
+        ones = np.ones(13 * self.num_agents + 6 * self.num_boxes + 13)
         self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
+        self.obs_split = [(self.num_boxes, 6), (self.num_agents, 13), (1, 13)]
+        self.obs_split_sizes = [num * size for num, size in self.obs_split]
+        def obs_processor(obs_dict: Tensor) -> Dict[str, Tensor]:
+            obs = obs_dict["obs"]
+            assert obs.shape == torch.Size((self.num_envs, self.num_agents, 13))
+            states_box = self.box_states.view(1, 1, -1).expand(self.num_envs, self.num_agents, -1) # (n_box, 6) -> (n_env, n_agent, n_box * 6)
+            states_drone = obs.view(self.num_envs, 1, -1).expand(-1, self.num_agents, -1) # (n_env, n_agent, 13) -> (n_env, n_agent, n_agent * 13)
+            states_self = obs  # (n_env, n_agent, 13)
+            obs_dict["obs"] = torch.cat([states_box, states_drone, states_self], dim=-1)
+            return obs_dict
+        self.obs_processor = obs_processor
+
+        # PID waypoint
         ones = np.ones(3)
         self.act_space = spaces.Box(-ones, ones)
+        def act_processor(actions: Tensor) -> Tensor:
+            target_pos = actions
+            pos, quat, vel, angvel = self.quadrotor_states \
+                .reshape(-1, 13) \
+                .split_with_sizes((3, 4, 3, 3), dim=-1)
+            rpms = self.controller.compute_control(
+                self.TIME_STEP,
+                pos, quat, vel, angvel,
+                target_pos.reshape(-1, 3),
+                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+            )[0]
+            return rpms.view(self.num_envs, self.num_agents, 4)
+        self.act_processor = act_processor
 
     def create_sim(self):
         self.sim_params.up_axis = gymapi.UP_AXIS_Z
@@ -76,7 +122,7 @@ class Quadrotor(MultiAgentVecTask):
         self.sim = self.gym.create_sim(
             self.device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         assert self.sim is not None
-        asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../assets')
+        asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../assets')
         asset_file = "urdf/quadrotor/cf2x.urdf"
         asset_urdf_tree = ElementTree.parse(os.path.join(asset_root, asset_file)).getroot()
         self.KF = float(asset_urdf_tree[0].attrib['kf'])
@@ -91,7 +137,8 @@ class Quadrotor(MultiAgentVecTask):
         
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = True
-        box_asset = self.gym.create_box(self.sim, 0.1, 0.1, 1., asset_options)
+        box_assets = {half_ext: self.gym.create_box(self.sim, *half_ext, asset_options)
+            for half_ext in set([box[3:] for box in self.boxes])}
 
         plane_params = gymapi.PlaneParams()
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
@@ -128,11 +175,9 @@ class Quadrotor(MultiAgentVecTask):
                         self.gym.get_actor_rigid_body_index(env, drone_handle, 0, gymapi.DOMAIN_ENV))
                 sim_root_index.append(self.gym.get_actor_index(env, drone_handle, gymapi.DOMAIN_SIM))
 
-            for i_box, center in enumerate([
-                    [-1, 1, 0.5],
-                    [1, 1, 0.5],
-                    [1, -1, 0.5],
-                    [-1, -1, 0.5]]):
+            for i_box in range(self.num_boxes):
+                center, half_ext = self.boxes[i_box][:3], self.boxes[i_box][3:]
+                box_asset = box_assets[half_ext]
                 box_pose.p = gymapi.Vec3(*center)
                 box_handle = self.gym.create_actor(env, box_asset, box_pose, f"box_{i_box}", i_env, 0) 
                 if i_env == 0:
@@ -151,16 +196,16 @@ class Quadrotor(MultiAgentVecTask):
 
     def reset_idx(self, env_ids):
         self.root_states[env_ids] = self.initial_root_states[env_ids]
-        pos = self.root_positions[:, self.env_actor_index["drone"]]
-        # print(pos.shape)
-        # self.root_positions[:, self.env_actor_index["drone"]] += torch.rand_like(pos) * 0.5
+        drone_pos = self.root_positions[:, self.env_actor_index["drone"]]
+        
         reset_indices = self.sim_root_index[env_ids].flatten()
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim, self.root_tensor, gymtorch.unwrap_tensor(reset_indices), len(reset_indices))
 
         self.reset_buf[env_ids] = 0
         self.progress_buf[env_ids] = 0
-        
+        self.cum_rew_buf[env_ids] = 0
+
         self.controller.reset_idx(env_ids, self.num_envs) # TODO: fix reset
 
     def pre_physics_step(self, actions: torch.Tensor):
@@ -192,8 +237,7 @@ class Quadrotor(MultiAgentVecTask):
         self.compute_reward()
     
     def compute_observations(self):
-        target = torch.tensor([0., 0., 1.], device=self.device)
-        self.obs_buf[..., :3] = (target - self.root_positions[:, self.env_actor_index["drone"]]) / 3
+        self.obs_buf[..., :3] = (self.targets - self.root_positions[:, self.env_actor_index["drone"]]) / 3
         self.obs_buf[..., 3:7] = self.root_quats[:, self.env_actor_index["drone"]]
         self.obs_buf[..., 7:10] = self.root_linvels[:, self.env_actor_index["drone"]] / 2.
         self.obs_buf[..., 10:13] = self.root_angvels[:, self.env_actor_index["drone"]] / math.pi
@@ -208,33 +252,44 @@ class Quadrotor(MultiAgentVecTask):
             pos, quat, vel, angvel, contact, self.targets,
             self.reset_buf, self.progress_buf, self.max_episode_length
         )
+        self.cum_rew_buf.add_(self.rew_buf)
         
-    def step(self, actions: torch.Tensor):
-        target_pos = actions
-        pos, quat, vel, angvel = self.root_states[:, self.env_actor_index["drone"]] \
-            .reshape(-1, 13) \
-            .split_with_sizes((3, 4, 3, 3), dim=-1)
-        actions = self.controller.compute_control(
-            self.TIME_STEP,
-            pos, quat, vel, angvel,
-            target_pos.reshape(-1, 3),
-            torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-            torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-            torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-        )[0].view(self.num_envs, self.num_agents, 4)
+    def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
+        actions = self.act_processor(actions)
         obs_dict, reward, done, info = super().step(actions)
-        return obs_dict["obs"].squeeze(), reward.clone().squeeze(), done.squeeze(), info
-        return obs_dict["obs"], reward, done, info
+        
+        self.obs_processor(obs_dict)
+        info["cum_rew"] = self.cum_rew_buf
+        info["step"] = self.progress_buf
+
+        # return obs_dict["obs"].squeeze(), reward.clone().squeeze(), done.squeeze(), info # single-agent debug with rlgpu
+        return obs_dict["obs"], reward.clone(), done, info # TODO: check mappo and remove .clone()
     
     def reset(self):
+        self.targets = self.root_positions[:, self.env_actor_index["drone"]].clone()
+        self.targets[..., 2] += 0.5
+
         self.controller.reset()
         obs_dict = super().reset()
-        return obs_dict["obs"].squeeze()
+        self.obs_processor(obs_dict)
+        # return obs_dict["obs"].squeeze() # single-agent debug with rlgpu
+        return obs_dict["obs"]
 
     def refresh_tensors(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
+    @property
+    def quadrotor_states(self) -> Tensor:
+        return self.root_states[:, self.env_actor_index["drone"]]
+
+    def __repr__(self) -> str:
+        obs_space = f"obs_space: {self.observation_space}"
+        act_space = f"act_space: {self.action_space}"
+        env_actor_index = "\n".join([f"{k}_index: {v}" for k, v in self.env_actor_index.items()])
+
+        return "\n".join([obs_space, act_space, env_actor_index])
+    
 # @torch.jit.script
 def compute_quadcopter_reward(
         root_positions: Tensor, 
@@ -251,11 +306,6 @@ def compute_quadcopter_reward(
     target_dist = torch.norm(targets - root_positions, dim=-1)
     pos_reward = 1.0 / (1.0 + target_dist * target_dist)
 
-    # uprightness
-    # ups = quat_axis(root_quats.squeeze(), 2)
-    # tiltage = torch.abs(1 - ups[..., 2])
-    # up_reward = (1.0 / (1.0 + tiltage * tiltage)).unsqueeze(1)
-
     # spinning
     spinnage = torch.abs(root_angvels[..., 2])
     spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
@@ -264,8 +314,7 @@ def compute_quadcopter_reward(
     collision = contact_forces.any(-1).float()
     
     # combined reward
-    # uprigness and spinning only matter when close to the target
-    reward = pos_reward + pos_reward * (spinnage_reward) - collision
+    reward = pos_reward + pos_reward * spinnage_reward - collision
     # resets due to misbehavior
     reset = torch.zeros_like(reset_buf)
     reset[target_dist > 3] = 1
@@ -274,142 +323,3 @@ def compute_quadcopter_reward(
     # resets due to episode length
     reset[progress_buf >= max_episode_length - 1] = 1
     return reward, reset
-
-from .utils import *
-
-class DSLPIDControl:
-    """
-    TODO: @ Botian: completely test the functionality of this controller...
-    """
-    def __init__(self, n, sim_params: gymapi.SimParams, kf, device="cpu") -> None:
-        self.device = device
-        self.P_COEFF_FOR = torch.tensor([.4, .4, 1.25], device=device)
-        self.I_COEFF_FOR = torch.tensor([.05, .05, .05], device=device)
-        self.D_COEFF_FOR = torch.tensor([.2, .2, .5], device=device)
-        self.P_COEFF_TOR = torch.tensor([70000., 70000., 60000.], device=device)
-        self.I_COEFF_TOR = torch.tensor([.0, .0, 500.], device=device)
-        self.D_COEFF_TOR = torch.tensor([20000., 20000., 12000.], device=device)
-        self.PWM2RPM_SCALE = 0.2685
-        self.PWM2RPM_CONST = 4070.3
-        self.MIN_PWM = 20000
-        self.MAX_PWM = 65535
-        self.GRAVITY = abs(sim_params.gravity.z) * 0.027
-        self.MIXER_MATRIX = torch.tensor([ [.5, -.5,  -1], [.5, .5, 1], [-.5,  .5,  -1], [-.5, -.5, 1] ], device=device)
-        self.KF = kf
-        self.N = n
-
-    def reset(self):
-        n = self.N
-        self.last_pos_e = torch.zeros((n, 3), device=self.device)
-        self.integral_pos_e = torch.zeros((n, 3), device=self.device)
-        self.last_rpy = torch.zeros((n, 3), device=self.device)
-        self.last_rpy_e = torch.zeros((n, 3), device=self.device)
-        self.integral_rpy_e = torch.zeros((n, 3), device=self.device)
-
-    def reset_idx(self, ids: torch.Tensor, num_envs: int):
-        self.last_pos_e.view(num_envs, -1)[ids] = 0
-        self.integral_pos_e.view(num_envs, -1)[ids] = 0
-        self.last_rpy.view(num_envs, -1)[ids] = 0
-        self.last_rpy_e.view(num_envs, -1)[ids] = 0
-        self.integral_rpy_e.view(num_envs, -1)[ids] = 0
-
-    def compute_control(self, control_timestep, 
-            cur_pos, cur_quat, cur_vel, cur_ang_vel,
-            target_pos, target_rpy, target_vel, target_rpy_rates):
-        thrust, computed_target_rotation, pos_e = self._position_control(
-            control_timestep,
-            cur_pos,
-            cur_quat,
-            cur_vel,
-            target_pos,
-            target_rpy,
-            target_vel
-            )
-        rpm = self._attitude_control(
-            control_timestep,
-            thrust,
-            cur_quat,
-            computed_target_rotation,
-            target_rpy_rates
-            )
-        return rpm, pos_e
-
-    def _position_control(self, 
-            control_timestep: float,
-            cur_pos: torch.Tensor,
-            cur_quat: torch.Tensor,
-            cur_vel: torch.Tensor,
-            target_pos: torch.Tensor,
-            target_rpy: torch.Tensor,
-            target_vel: torch.Tensor):
-        
-        pos_e = target_pos - cur_pos
-        vel_e = target_vel - cur_vel
-        cur_rotation = quaternion_to_rotation_matrix(cur_quat) # (*, 3, 3)
-        self.integral_pos_e = self.integral_pos_e + pos_e*control_timestep
-        self.integral_pos_e = torch.clip(self.integral_pos_e, -2., 2.)
-        self.integral_pos_e[..., 2] = torch.clip(self.integral_pos_e[..., 2], -0.15, .15)
-
-        target_thrust = self.P_COEFF_FOR * pos_e \
-            + self.I_COEFF_FOR * self.integral_pos_e \
-            + self.D_COEFF_FOR * vel_e \
-            + torch.tensor([0, 0, self.GRAVITY], device=self.device) # (*, 3)
-        scalar_thrust = torch.relu(target_thrust.view(-1, 1, 3) @ cur_rotation[..., :, 2].view(-1, 3, 1)).view(-1, 1)
-        thrust = (torch.sqrt(scalar_thrust / (4*self.KF)) - self.PWM2RPM_CONST) / self.PWM2RPM_SCALE
-        target_z_ax = target_thrust / torch.linalg.norm(target_thrust, axis=-1, keepdims=True)
-        target_x_c = torch.stack([
-            torch.cos(target_rpy[..., 2]), torch.sin(target_rpy[..., 2]), torch.zeros_like(target_rpy[..., 2])], dim=-1)
-        target_y_ax = torch.cross(target_z_ax, target_x_c) / torch.linalg.norm(torch.cross(target_z_ax, target_x_c), axis=-1, keepdims=True)
-        target_x_ax = torch.cross(target_y_ax, target_z_ax)
-        target_rotation = torch.stack([target_x_ax, target_y_ax, target_z_ax], dim=-1)
-        # print("target_thrust", target_thrust)
-        # print("scalar_thrust", scalar_thrust)
-        # print("thrust", thrust)
-        # print("target_z_ax", target_z_ax)
-        # print("target_x_c", target_x_c)
-        # print("target_y_ax", target_y_ax)
-        # print("target_x_ax", target_x_ax)
-        # print("target_rotation", target_rotation)
-        # raise
-        return thrust, target_rotation, pos_e
-    
-    def _attitude_control(self,
-            control_timestep: float,
-            thrust: torch.Tensor,
-            cur_quat: torch.Tensor,
-            target_rotation: torch.Tensor,
-            target_rpy_rates: torch.Tensor):
-        cur_rotation = quaternion_to_rotation_matrix(cur_quat)
-        cur_rpy = quaternion_to_euler(cur_quat)
-
-        rot_matrix_e = target_rotation.transpose(-1, -2) @ cur_rotation - cur_rotation.transpose(-1, -2) @ target_rotation
-
-        rot_e = torch.stack([rot_matrix_e[..., 2, 1], rot_matrix_e[..., 0, 2], rot_matrix_e[..., 1, 0]], dim=-1)
-        rpy_rates_e = target_rpy_rates - (cur_rpy - self.last_rpy) / control_timestep
-        self.last_rpy = cur_rpy
-        self.integral_rpy_e = self.integral_rpy_e - rot_e*control_timestep
-        self.integral_rpy_e = torch.clip(self.integral_rpy_e, -1500., 1500.)
-        self.integral_rpy_e[..., 0:2] = torch.clip(self.integral_rpy_e[..., 0:2], -1., 1.)
-        #### PID target torques ####################################
-        target_torques = - self.P_COEFF_TOR * rot_e \
-                         + self.D_COEFF_TOR * rpy_rates_e \
-                         + self.I_COEFF_TOR * self.integral_rpy_e
-        # print("P * rot_e", self.P_COEFF_TOR * rot_e)
-        # print("D * rpy_rates_e", self.D_COEFF_TOR * rpy_rates_e)
-        # print("I * self.integral_rpy_e", self.I_COEFF_TOR * self.integral_rpy_e)
-        
-        target_torques = torch.clip(target_torques, -3200, 3200)
-        pwm = thrust + (self.MIXER_MATRIX @ target_torques.T).T
-
-        # print("cur_rotation: ", cur_rotation)
-        # print("target_rotation: ", target_rotation)
-        # print("rot_matrix_e: ", rot_matrix_e)
-        # print("rot_e: ", rot_e)
-        # print("rpy_rates_e: ", rpy_rates_e)
-        # print("integral_rpy_e: ", self.integral_rpy_e)
-        # print("target_torques: ", target_torques)
-        # print("pwm: ", pwm)
-        # print("thrust: ", thrust)
-        # raise
-        pwm = torch.clip(pwm, self.MIN_PWM, self.MAX_PWM)
-        return self.PWM2RPM_SCALE * pwm + self.PWM2RPM_CONST

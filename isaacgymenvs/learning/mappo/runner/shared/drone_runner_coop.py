@@ -1,5 +1,6 @@
 from cmath import inf
 import time
+from isaacgymenvs.tasks.quadrotor.quadrotor import Quadrotor
 import numpy as np
 import torch
 from .base_runner import Runner
@@ -17,47 +18,52 @@ class DroneRunner(Runner):
         self.eval_episodes = all_args.eval_episodes
         self.episodes_per_update = all_args.episodes_per_update
 
+        if all_args.use_attn:
+            envs: Quadrotor = config["envs"]
+            obs_split = envs.obs_split
+            envs.share_observation_space = envs.obs_space = \
+                [[sum(num*dim for num,dim in obs_split), *obs_split]]
+        
         super().__init__(config)
-        print("obs space:", self.envs.observation_space[0])
-        print("act space:", self.envs.action_space[0])
-
-        # self.num_drones = self.envs.getattr_single("NUM_DRONES")
-        # self.predators = self.envs.getattr_single("predators")
-        # self.preys = self.envs.getattr_single("preys")
-        # self.max_reward = self.envs.getattr_single("max_reward")
-        # self.horizon = self.envs.getattr_single("max_steps")
-        # self.cl_max_vel = self.all_args.max_vel
-        # self.cl_min_vel = self.all_args.min_vel
-        # self.success_threshold = self.all_args.success_threshold
 
     def run(self):
-        self.warmup()
+        obs = self.envs.reset()
+        share_obs = obs
 
-        start = time.time()
+        self.buffer.share_obs[0] = share_obs
+        self.buffer.obs[0] = obs
+
+        start = time.perf_counter()
         episodes = int(self.num_env_steps) // self.episode_length // self.n_rollout_threads
 
-        reward_normalizer = self.episodes_per_update * self.n_rollout_threads * 500
+        env_step_time = 0
+        inf_step_time = 0
         for episode in range(episodes):
             if self.use_linear_lr_decay:
                 self.trainer.policy.lr_decay(episode, episodes)
 
-            episode_count = 0
-            collision_penalty = 0
-            action_stats = []
+            episode_rewards = []
+            episode_lengths = []
+            
             for step in range(self.episode_length):
                 # Sample actions
+                _step_start = time.perf_counter()
                 values, actions, action_log_probs, rnn_states, rnn_states_critic = self.collect(step)
+                _inf_end = time.perf_counter()
                 # Obser reward and next obs, (n_threads, n_agents, *)
                 obs, rewards, dones, infos = self.envs.step(actions)
-                action_stats.append(actions)
+                _env_end = time.perf_counter()
                 data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic
 
                 # insert data into buffer
                 self.insert(data)
 
                 # record statistics
-                envs_done = torch.nonzero(torch.all(dones, axis=1))
-                episode_count += len(envs_done)
+                env_dones = dones.all(-1)
+                episode_rewards.append(infos["cum_rew"][env_dones])
+                episode_lengths.append(infos["step"][env_dones])
+                inf_step_time += _inf_end - _step_start
+                env_step_time += _env_end - _inf_end
 
             # compute return and update network
             self.compute()
@@ -72,27 +78,21 @@ class DroneRunner(Runner):
 
             # log information
             if episode % self.log_interval == 0:
-                end = time.time()
+                end = time.perf_counter()
                 print(
                     f"num_agents:{self.num_agents}, updates: {episode}/{episodes} iters, " \
-                    + f"total num timesteps: {total_num_steps}/{self.num_env_steps}, FPS: {int(total_num_steps / (end - start))}, " \
-                    + f"run time: {end - start}"
+                    + f"total num timesteps: {total_num_steps}/{self.num_env_steps}, FPS: {int(total_num_steps / (end - start))}, "
                 )
-                train_infos["reward"] = torch.mean(self.buffer.rewards) * self.episode_length
+                print(f"runtime: {env_step_time:.2f} (env), {inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total)")
+                train_infos["reward"] = torch.cat(episode_rewards).mean(0)
+                train_infos["length"] = torch.cat(episode_lengths).float().mean(0)
                 print("reward:", train_infos["reward"])
+                print("length:", train_infos["length"])
                 # self.log(train_infos, total_num_steps)
 
             # eval
             # if episode % self.eval_interval == 0 and self.use_eval:
             #     self.eval(total_num_steps)
-
-    def warmup(self):
-        # reset env
-        obs = self.envs.reset()
-        share_obs = obs
-
-        self.buffer.share_obs[0] = share_obs
-        self.buffer.obs[0] = obs
 
     @torch.no_grad()
     def collect(self, step):

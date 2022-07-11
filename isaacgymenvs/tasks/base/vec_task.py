@@ -767,6 +767,8 @@ class MultiAgentVecTask(VecTask):
             (self.num_envs, self.num_agents, self.num_states), device=self.device, dtype=torch.float)
         self.rew_buf = torch.zeros(
             (self.num_envs, self.num_agents), device=self.device, dtype=torch.float)
+        self.cum_rew_buf = torch.zeros_like(self.rew_buf)
+
         self.reset_buf = torch.ones(
             (self.num_envs, self.num_agents), device=self.device, dtype=torch.long)
         self.timeout_buf = torch.zeros(

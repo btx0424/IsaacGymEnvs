@@ -49,7 +49,7 @@ params:
   entropy_coef: 0.01
   env_name: StarCraft2
   episode_len_sec: 15
-  episode_length: 400
+  episode_length: 8
   episodes_per_update: 4
   eval_episodes: 32
   eval_interval: 25
@@ -82,7 +82,7 @@ params:
   num_preys: 1
   opti_eps: 1.0e-05
   policy_value_loss_coef: 1
-  ppo_epoch: 15
+  ppo_epoch: 5
   recurrent_N: 1
   render_episodes: 5
   restart_easy: 0.2

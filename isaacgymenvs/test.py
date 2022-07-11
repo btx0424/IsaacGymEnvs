@@ -13,6 +13,7 @@ def test(config):
     env = Quadrotor(
         config.task, config.rl_device, config.sim_device, 
         config.graphics_device_id, config.headless)
+    print(env)
     env.reset()
     
     steps = 0
@@ -35,6 +36,9 @@ def test(config):
         #     print(torch.norm(env.root_positions - actions, dim=-1).mean())
         # if (time.perf_counter() - time_start) > 10:
         #     break
+        env_done = done.all(-1)
+        if env_done.any():
+            print(info["cum_rew"][env_done].mean())
 
     print("fps:", steps / (time.perf_counter() - time_start))
 
