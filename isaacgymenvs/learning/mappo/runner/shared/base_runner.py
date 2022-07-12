@@ -1,6 +1,8 @@
     
+from dataclasses import dataclass
 import time
 from typing import Dict
+from isaacgymenvs.learning.mappo.algorithms.rmappo import MAPPOPolicy
 import wandb
 import os
 import numpy as np
@@ -17,6 +19,10 @@ webhook_url = " https://hooks.slack.com/services/THP5T1RAL/B029P2VA7SP/GwACUSgif
 
 def _t2n(x):
     return x.detach().cpu().numpy()
+
+@dataclass
+class RunnerConfig:
+    device: torch.device
 
 class Runner(object):
     def __init__(self, config):
@@ -55,48 +61,20 @@ class Runner(object):
 
         # dir
         self.model_dir = self.all_args.model_dir
-        
-        if "mappo" in self.algorithm_name:
-            if self.use_single_network:
-                from isaacgymenvs.learning.mappo.algorithms.r_mappo_single.r_mappo_single import R_MAPPO as TrainAlgo
-                from isaacgymenvs.learning.mappo.algorithms.r_mappo_single.algorithm.rMAPPOPolicy import R_MAPPOPolicy as Policy
-            else:
-                from isaacgymenvs.learning.mappo.algorithms.r_mappo.r_mappo import R_MAPPO as TrainAlgo
-                from isaacgymenvs.learning.mappo.algorithms.r_mappo.algorithm.rMAPPOPolicy import R_MAPPOPolicy as Policy
-        elif "mappg" in self.algorithm_name:
-            if self.use_single_network:
-                from isaacgymenvs.learning.mappo.algorithms.r_mappg_single.r_mappg_single import R_MAPPG as TrainAlgo
-                from isaacgymenvs.learning.mappo.algorithms.r_mappg_single.algorithm.rMAPPGPolicy import R_MAPPGPolicy as Policy
-            else:
-                from isaacgymenvs.learning.mappo.algorithms.r_mappg.r_mappg import R_MAPPG as TrainAlgo
-                from isaacgymenvs.learning.mappo.algorithms.r_mappg.algorithm.rMAPPGPolicy import R_MAPPGPolicy as Policy
-        elif "ft" in self.algorithm_name:
-            print("use frontier-based algorithm")
-        else:
-            raise NotImplementedError
-        
         share_observation_space = self.envs.share_observation_space[0] if self.use_centralized_V else self.envs.observation_space[0]
 
-        if "ft" not in self.algorithm_name:
-            # policy network
-            self.policy = Policy(self.all_args,
-                                self.envs.observation_space[0],
-                                share_observation_space,
-                                self.envs.action_space[0],
-                                device = self.device)
-
-            if self.model_dir is not None:
-                self.restore()
-
-            # algorithm
-            self.trainer = TrainAlgo(self.all_args, self.policy, device = self.device)
         
+        self.policy = MAPPOPolicy(self.all_args,
+            self.envs.observation_space[0],
+            share_observation_space,
+            self.envs.action_space[0])
+
             # buffer
-            self.buffer = SharedReplayBuffer(self.all_args,
-                                        self.num_agents,
-                                        self.envs.observation_space[0],
-                                        share_observation_space,
-                                        self.envs.action_space[0])
+        self.buffer = SharedReplayBuffer(self.all_args,
+            self.num_agents,
+            self.envs.observation_space[0],
+            share_observation_space,
+            self.envs.action_space[0])
 
     def run(self):
         raise NotImplementedError
@@ -112,17 +90,17 @@ class Runner(object):
     
     @torch.no_grad()
     def compute(self):
-        self.trainer.prep_rollout()
-        next_values = self.trainer.policy.get_values(
+        self.policy.prep_rollout()
+        next_values = self.policy.get_values(
             self.buffer.share_obs[-1].flatten(end_dim=1),
             self.buffer.rnn_states_critic[-1].flatten(end_dim=1),
             self.buffer.masks[-1].flatten(end_dim=1))
         next_values = next_values.reshape(self.n_rollout_threads, self.num_agents, 1)
-        self.buffer.compute_returns(next_values, self.trainer.value_normalizer)
+        self.buffer.compute_returns(next_values, self.policy.value_normalizer)
     
     def train(self):
-        self.trainer.prep_training()
-        train_infos = self.trainer.train(self.buffer)      
+        self.policy.prep_training()
+        train_infos = self.policy.train(self.buffer)      
         self.buffer.after_update()
         self.log_system()
         return train_infos

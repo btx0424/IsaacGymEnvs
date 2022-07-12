@@ -17,7 +17,9 @@ env:
 
   # set to True if you use camera sensors in the environment
   enableCameraSensors: False
-
+  jointSpace: false
+  actType: pid_vel
+  
 sim:
   dt: 0.01
   substeps: 1

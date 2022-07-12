@@ -1,6 +1,6 @@
 from cmath import inf
 import time
-from isaacgymenvs.tasks.quadrotor.quadrotor import Quadrotor
+from isaacgymenvs.tasks.quadrotor import QuadrotorBase
 import numpy as np
 import torch
 from .base_runner import Runner
@@ -16,10 +16,9 @@ class DroneRunner(Runner):
     def __init__(self, config):
         all_args = config["all_args"]
         self.eval_episodes = all_args.eval_episodes
-        self.episodes_per_update = all_args.episodes_per_update
 
         if all_args.use_attn:
-            envs: Quadrotor = config["envs"]
+            envs: QuadrotorBase = config["envs"]
             obs_split = envs.obs_split
             envs.share_observation_space = envs.obs_space = \
                 [[sum(num*dim for num,dim in obs_split), *obs_split]]
@@ -40,11 +39,11 @@ class DroneRunner(Runner):
         inf_step_time = 0
         for episode in range(episodes):
             if self.use_linear_lr_decay:
-                self.trainer.policy.lr_decay(episode, episodes)
+                self.policy.lr_decay(episode, episodes)
 
             episode_rewards = []
             episode_lengths = []
-            
+            episode_successes = []
             for step in range(self.episode_length):
                 # Sample actions
                 _step_start = time.perf_counter()
@@ -62,6 +61,8 @@ class DroneRunner(Runner):
                 env_dones = dones.all(-1)
                 episode_rewards.append(infos["cum_rew"][env_dones])
                 episode_lengths.append(infos["step"][env_dones])
+                # episode_successes.append(infos["success"][env_dones])
+
                 inf_step_time += _inf_end - _step_start
                 env_step_time += _env_end - _inf_end
 
@@ -96,9 +97,9 @@ class DroneRunner(Runner):
 
     @torch.no_grad()
     def collect(self, step):
-        self.trainer.prep_rollout()
+        self.policy.prep_rollout()
         value, action, action_log_prob, rnn_states, rnn_states_critic \
-            = self.trainer.policy.get_actions(
+            = self.policy.get_actions(
                 self.buffer.share_obs[step].flatten(end_dim=1),
                 self.buffer.obs[step].flatten(end_dim=1),
                 self.buffer.rnn_states[step].flatten(end_dim=1),
@@ -110,12 +111,6 @@ class DroneRunner(Runner):
         action_log_probs = action_log_prob.reshape(self.n_rollout_threads, self.num_agents, -1)
         rnn_states = rnn_states.reshape(self.n_rollout_threads, self.num_agents, *rnn_states.shape[1:])
         rnn_states_critic  = rnn_states_critic.reshape(self.n_rollout_threads, self.num_agents, *rnn_states_critic.shape[1:])
-
-        # values = np.array(np.split(_t2n(value), self.n_rollout_threads))
-        # actions = np.array(np.split(_t2n(action), self.n_rollout_threads))
-        # action_log_probs = np.array(np.split(_t2n(action_log_prob), self.n_rollout_threads))
-        # rnn_states = np.array(np.split(_t2n(rnn_states), self.n_rollout_threads))
-        # rnn_states_critic = np.array(np.split(_t2n(rnn_states_critic), self.n_rollout_threads))
 
         return values, actions, action_log_probs, rnn_states, rnn_states_critic
     
@@ -154,8 +149,8 @@ class DroneRunner(Runner):
         frames = []
 
         for eval_step in tqdm(range(self.eval_envs.getattr_single("max_steps"))):
-            self.trainer.prep_rollout()
-            eval_action, eval_rnn_states = self.trainer.policy.act(
+            self.policy.prep_rollout()
+            eval_action, eval_rnn_states = self.policy.act(
                 np.concatenate(eval_obs),
                 np.concatenate(eval_rnn_states),
                 np.concatenate(eval_masks),

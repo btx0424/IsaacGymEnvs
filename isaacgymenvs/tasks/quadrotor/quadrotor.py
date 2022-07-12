@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 import torch
 import os
 import math
@@ -6,13 +7,26 @@ import numpy as np
 from isaacgym import gymapi, gymtorch, gymutil
 from gym import spaces
 from xml.etree import ElementTree
-from typing import Dict, Tuple, Any
+from typing import Callable, Dict, Tuple, Any
 from torch import Tensor
 from collections import defaultdict
 from .controller import DSLPIDControl
 from ..base.vec_task import MultiAgentVecTask
 
-class Quadrotor(MultiAgentVecTask):
+class TensorDict(dict):
+    def reshape(self, *shape: int):
+        for key, value in self.items():
+            self[key] = value.reshape(*shape)
+        return self
+
+class TensorTuple(Tuple[torch.Tensor, ...]):
+    def reshape(self, *shape: int):
+        return TensorTuple(v.reshape(*shape) for v in self)
+
+    def flatten(self, start_dim: int = 0, end_dim: int = -1):
+        return TensorTuple(v.flatten(start_dim, end_dim) for v in self)
+
+class QuadrotorBase(MultiAgentVecTask):
     
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         
@@ -21,13 +35,15 @@ class Quadrotor(MultiAgentVecTask):
         
         self.cfg = cfg
         self.actor_types = ["drone", "box"]
-        self.boxes = [
-            (-1, 1, 0.5, 0.1, 0.1, 1.),
-            (1, 1, 0.5, 0.1, 0.1, 1.),
-            (1, -1, 0.5, 0.1, 0.1, 1.),
-            (-1, -1, 0.5, .1, 0.1, 1.)]
+        self.box_states = torch.tensor([
+            [-1, 1, 0.5, 0.1, 0.1, 1.],
+            [1, 1, 0.5, 0.1, 0.1, 1.],
+            [1, -1, 0.5, 0.1, 0.1, 1.],
+            [-1, -1, 0.5, .1, 0.1, 1.]], device=rl_device)
         # self.num_drones = cfg["env"]["numDrones"]
-        self.num_boxes = len(self.boxes)
+        self.num_boxes = len(self.box_states)
+        self.act_type = cfg["env"].get("actType", "pid_vel")
+        self.joint_space = cfg["env"].get("jointSpace", False)
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
@@ -48,7 +64,6 @@ class Quadrotor(MultiAgentVecTask):
         self.contact_forces: Tensor = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, self.bodies_per_env, 3)
         
         self.initial_root_states = self.root_states.clone()
-        self.box_states = torch.tensor(self.boxes, dtype=torch.float32, device=self.device)
 
         self.forces = torch.zeros(
             (self.num_envs, self.bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
@@ -57,7 +72,7 @@ class Quadrotor(MultiAgentVecTask):
         self.max_episode_length = self.cfg["env"]["maxEpisodeLength"]
 
         if self.viewer:
-            cam_pos = gymapi.Vec3(1.0, 1.0, 1.8)
+            cam_pos = gymapi.Vec3(-1.0, -1.0, 1.8)
             cam_target = gymapi.Vec3(2.2, 2.0, 1.0)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
@@ -67,51 +82,39 @@ class Quadrotor(MultiAgentVecTask):
         # 3. where to do normalization ...
 
         # MLP obs without obstacles
-        # ones = np.ones(13 * self.num_agents + self.num_agents)
-        # self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
-        # def obs_processor(obs_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
-        #     obs = obs_dict["obs"]
-        #     assert obs.shape == torch.Size((self.num_envs, self.num_agents, 13))
-        #     states = obs.view(self.num_envs, 1, -1).expand(-1, self.num_agents, -1)
-        #     identity = torch.eye(self.num_agents, device=obs.device).expand(self.num_envs, -1, -1)
-        #     obs_dict["obs"] = torch.cat([states, identity], dim=-1)
-        #     return obs_dict
-        # self.obs_processor = obs_processor
-
-        # attention obs with obstacles
-        # maybe a dict is better?
-        ones = np.ones(13 * self.num_agents + 6 * self.num_boxes + 13)
+        num_obs = 13 * self.num_agents + self.num_agents + 3
+        if self.joint_space: num_obs *= self.num_agents
+        ones = np.ones(num_obs)
         self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
-        self.obs_split = [(self.num_boxes, 6), (self.num_agents, 13), (1, 13)]
-        self.obs_split_sizes = [num * size for num, size in self.obs_split]
-        def obs_processor(obs_dict: Tensor) -> Dict[str, Tensor]:
+        def obs_processor(obs_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
             obs = obs_dict["obs"]
             assert obs.shape == torch.Size((self.num_envs, self.num_agents, 13))
-            states_box = self.box_states.view(1, 1, -1).expand(self.num_envs, self.num_agents, -1) # (n_box, 6) -> (n_env, n_agent, n_box * 6)
-            states_drone = obs.view(self.num_envs, 1, -1).expand(-1, self.num_agents, -1) # (n_env, n_agent, 13) -> (n_env, n_agent, n_agent * 13)
-            states_self = obs  # (n_env, n_agent, 13)
-            obs_dict["obs"] = torch.cat([states_box, states_drone, states_self], dim=-1)
+            states = obs.view(self.num_envs, 1, -1).expand(-1, self.num_agents, -1)
+            identity = torch.eye(self.num_agents, device=obs.device).expand(self.num_envs, -1, -1)
+            obs_dict["obs"] = torch.cat([self.targets, states, identity], dim=-1)
+            if self.joint_space: 
+                obs_dict["obs"] = obs_dict["obs"].view(self.num_envs, -1)
             return obs_dict
         self.obs_processor = obs_processor
 
-        # PID waypoint
-        ones = np.ones(3)
-        self.act_space = spaces.Box(-ones, ones)
-        def act_processor(actions: Tensor) -> Tensor:
-            target_pos = actions
-            pos, quat, vel, angvel = self.quadrotor_states \
-                .reshape(-1, 13) \
-                .split_with_sizes((3, 4, 3, 3), dim=-1)
-            rpms = self.controller.compute_control(
-                self.TIME_STEP,
-                pos, quat, vel, angvel,
-                target_pos.reshape(-1, 3),
-                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-                torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-            )[0]
-            return rpms.view(self.num_envs, self.num_agents, 4)
-        self.act_processor = act_processor
+        # attention obs with obstacles
+        # maybe a dict is better?
+        # ones = np.ones(13 * self.num_agents + 6 * self.num_boxes + 13)
+        # self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
+        # self.obs_split = [(self.num_boxes, 6), (self.num_agents, 13), (1, 13)]
+        # self.obs_split_sizes = [num * size for num, size in self.obs_split]
+        # def obs_processor(obs_dict: Tensor) -> Dict[str, Tensor]:
+        #     obs = obs_dict["obs"]
+        #     assert obs.shape == torch.Size((self.num_envs, self.num_agents, 13))
+        #     states_box = self.box_states.view(1, 1, -1).expand(self.num_envs, self.num_agents, -1) # (n_box, 6) -> (n_env, n_agent, n_box * 6)
+        #     states_drone = obs.view(self.num_envs, 1, -1).expand(-1, self.num_agents, -1) # (n_env, n_agent, 13) -> (n_env, n_agent, n_agent * 13)
+        #     states_self = obs  # (n_env, n_agent, 13)
+        #     obs_dict["obs"] = torch.cat([states_box, states_drone, states_self], dim=-1)
+        #     return obs_dict
+        # self.obs_processor = obs_processor
+
+        self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
+        self.create_act_space_and_processor(self.act_type)
 
     def create_sim(self):
         self.sim_params.up_axis = gymapi.UP_AXIS_Z
@@ -137,8 +140,8 @@ class Quadrotor(MultiAgentVecTask):
         
         asset_options = gymapi.AssetOptions()
         asset_options.fix_base_link = True
-        box_assets = {half_ext: self.gym.create_box(self.sim, *half_ext, asset_options)
-            for half_ext in set([box[3:] for box in self.boxes])}
+        box_assets = {tuple(half_ext.tolist()): self.gym.create_box(self.sim, *half_ext, asset_options)
+            for half_ext in set([box[3:] for box in self.box_states])}
 
         plane_params = gymapi.PlaneParams()
         plane_params.normal = gymapi.Vec3(0.0, 0.0, 1.0)
@@ -156,6 +159,14 @@ class Quadrotor(MultiAgentVecTask):
         env_actor_index = defaultdict(lambda:[])
         env_body_index = defaultdict(lambda:[])
         sim_root_index = []
+
+        self.MAX_XYZ = torch.tensor([3, 3, 1], device=self.device)
+        self.MIN_XYZ = torch.tensor([-3, -3, 0], device=self.device)
+
+        cell_size = 0.4
+        grid_shape = ((self.MAX_XYZ - self.MIN_XYZ) / cell_size).int()
+        centers = torch.tensor(list(np.ndindex(*(grid_shape.cpu()))), device=self.rl_device) + 0.5
+        avail = torch.ones(len(centers), dtype=bool)
 
         for i_env in range(self.num_envs):
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
@@ -176,10 +187,16 @@ class Quadrotor(MultiAgentVecTask):
                 sim_root_index.append(self.gym.get_actor_index(env, drone_handle, gymapi.DOMAIN_SIM))
 
             for i_box in range(self.num_boxes):
-                center, half_ext = self.boxes[i_box][:3], self.boxes[i_box][3:]
-                box_asset = box_assets[half_ext]
+                center, half_ext = self.box_states[i_box][:3], self.box_states[i_box][3:]
+                box_asset = box_assets[tuple(half_ext.tolist())]
                 box_pose.p = gymapi.Vec3(*center)
                 box_handle = self.gym.create_actor(env, box_asset, box_pose, f"box_{i_box}", i_env, 0) 
+                
+                min_corner = torch.floor((center-half_ext-self.MIN_XYZ) / cell_size)
+                max_corner = torch.ceil((center+half_ext-self.MIN_XYZ) / cell_size)
+                mask = (centers > min_corner).all(1) & (centers < max_corner).all(1)
+                avail[mask] = False
+                
                 if i_env == 0:
                     env_actor_index["box"].append(
                         self.gym.get_actor_index(env, box_handle, gymapi.DOMAIN_ENV))
@@ -192,15 +209,17 @@ class Quadrotor(MultiAgentVecTask):
         self.actors_per_env = self.gym.get_actor_count(env)
         self.sim_root_index = torch.tensor(sim_root_index, dtype=torch.int32, device=self.device).reshape(self.num_envs, self.actors_per_env)
 
-        self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
-
+        self.grid_centers = centers * cell_size + self.MIN_XYZ
+        self.grid_avail = torch.nonzero(avail).flatten()
+        
     def reset_idx(self, env_ids):
         self.root_states[env_ids] = self.initial_root_states[env_ids]
-        drone_pos = self.root_positions[:, self.env_actor_index["drone"]]
+        sample_idx = np.random.choice(self.grid_avail, self.num_agents, replace=False)
+        self.quadrotor_pos = self.grid_centers[sample_idx]
         
-        reset_indices = self.sim_root_index[env_ids].flatten()
+        root_reset_ids = self.sim_root_index[env_ids].flatten()
         self.gym.set_actor_root_state_tensor_indexed(
-            self.sim, self.root_tensor, gymtorch.unwrap_tensor(reset_indices), len(reset_indices))
+            self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
 
         self.reset_buf[env_ids] = 0
         self.progress_buf[env_ids] = 0
@@ -215,7 +234,6 @@ class Quadrotor(MultiAgentVecTask):
             self.reset_idx(reset_env_ids)
         actions = actions.to(self.device)
 
-        # rpms = self.HOVER_RPM * (1+0.05*actions)
         rpms = actions
         forces = rpms**2 * self.KF # (env, actor, 4)
         torques = rpms**2 * self.KM
@@ -235,18 +253,24 @@ class Quadrotor(MultiAgentVecTask):
         self.refresh_tensors()
         self.compute_observations()
         self.compute_reward()
+
+        if self.viewer:
+            self.gym.clear_lines(self.viewer)
+            if hasattr(self, "targets"):
+                points = torch.cat([self.quadrotor_pos[0], self.targets[0]], dim=-1).cpu().numpy()
+                self.gym.add_lines(self.viewer, self.envs[0], self.num_agents, points, [0, 1, 0])
     
     def compute_observations(self):
-        self.obs_buf[..., :3] = (self.targets - self.root_positions[:, self.env_actor_index["drone"]]) / 3
+        # self.obs_buf[..., :3] = (self.targets - self.quadrotor_pos) / 3
+        self.obs_buf[..., :3] = self.quadrotor_pos
         self.obs_buf[..., 3:7] = self.root_quats[:, self.env_actor_index["drone"]]
         self.obs_buf[..., 7:10] = self.root_linvels[:, self.env_actor_index["drone"]] / 2.
         self.obs_buf[..., 10:13] = self.root_angvels[:, self.env_actor_index["drone"]] / math.pi
         return self.obs_buf
 
     def compute_reward(self):
-        pos, quat, vel, angvel = self.root_states[:, self.env_actor_index["drone"]] \
-            .reshape(self.num_envs, self.num_agents, 13) \
-            .split_with_sizes((3, 4, 3, 3), dim=-1)
+        pos, quat, vel, angvel = self.quadrotor_states
+            
         contact = self.contact_forces[:, self.env_body_index["base"]]
         self.rew_buf[:], self.reset_buf[:] = compute_quadcopter_reward(
             pos, quat, vel, angvel, contact, self.targets,
@@ -255,6 +279,7 @@ class Quadrotor(MultiAgentVecTask):
         self.cum_rew_buf.add_(self.rew_buf)
         
     def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
+        actions = actions.view(self.num_envs, self.num_agents, -1)
         actions = self.act_processor(actions)
         obs_dict, reward, done, info = super().step(actions)
         
@@ -262,17 +287,22 @@ class Quadrotor(MultiAgentVecTask):
         info["cum_rew"] = self.cum_rew_buf
         info["step"] = self.progress_buf
 
-        # return obs_dict["obs"].squeeze(), reward.clone().squeeze(), done.squeeze(), info # single-agent debug with rlgpu
+        # rad = (self.progress_buf.unsqueeze(-1)+torch.arange(self.num_agents, device=self.rl_device))/self.max_episode_length*math.pi*2
+        # self.targets[..., 0] = torch.sin(rad)
+        # self.targets[..., 1] = torch.cos(rad)
+
+        if self.joint_space:
+            done = done.any(-1)
+            reward = reward.sum(-1)
         return obs_dict["obs"], reward.clone(), done, info # TODO: check mappo and remove .clone()
     
     def reset(self):
-        self.targets = self.root_positions[:, self.env_actor_index["drone"]].clone()
+        self.targets = self.quadrotor_pos.clone()
         self.targets[..., 2] += 0.5
 
         self.controller.reset()
         obs_dict = super().reset()
         self.obs_processor(obs_dict)
-        # return obs_dict["obs"].squeeze() # single-agent debug with rlgpu
         return obs_dict["obs"]
 
     def refresh_tensors(self):
@@ -280,8 +310,17 @@ class Quadrotor(MultiAgentVecTask):
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
     @property
-    def quadrotor_states(self) -> Tensor:
-        return self.root_states[:, self.env_actor_index["drone"]]
+    def quadrotor_states(self) -> TensorTuple:
+        return TensorTuple(self.root_states[:, self.env_actor_index["drone"]]\
+            .split_with_sizes((3, 4, 3, 3), dim=-1))
+
+    @property
+    def quadrotor_pos(self) -> Tensor:
+        return self.root_positions[:, self.env_actor_index["drone"], :3]
+
+    @quadrotor_pos.setter
+    def quadrotor_pos(self, pos: Tensor):
+        self.root_positions[:, self.env_actor_index["drone"], :3] = pos
 
     def __repr__(self) -> str:
         obs_space = f"obs_space: {self.observation_space}"
@@ -290,6 +329,112 @@ class Quadrotor(MultiAgentVecTask):
 
         return "\n".join([obs_space, act_space, env_actor_index])
     
+    def create_act_space_and_processor(self, act_type) -> None:
+        if act_type == "pid_waypoint":
+            ones = np.ones(3 * self.num_agents) if self.joint_space else np.ones(3)
+            self.act_space = spaces.Box(-ones, ones)
+            def act_processor(actions: Tensor) -> Tensor:
+                pos, quat, vel, angvel = self.quadrotor_states.flatten(end_dim=-2)
+                target_pos = actions.reshape(-1, 3)
+                if self.viewer:
+                    points = torch.cat([pos[:self.num_agents], target_pos[:self.num_agents]], dim=1).cpu().numpy()
+                    self.gym.add_lines(
+                        self.viewer, 
+                        self.envs[0], 
+                        self.num_agents, 
+                        points,
+                        [1, 0, 0])
+
+                rpms = self.controller.compute_control(
+                    self.TIME_STEP,
+                    pos, quat, vel, angvel,
+                    target_pos,
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                )[0]
+                return rpms.view(self.num_envs, self.num_agents, 4)
+            self.act_processor = act_processor
+        elif act_type == "pid_vel":
+            ones = np.ones(3 * self.num_agents) if self.joint_space else np.ones(3)
+            self.act_space = spaces.Box(-ones * 3, ones * 3)
+            def act_processor(actions: Tensor) -> Tensor:
+                pos, quat, vel, angvel = self.quadrotor_states.flatten(end_dim=-2)
+                target_vel = actions.reshape(-1, 3)
+                if self.viewer:
+                    points = torch.cat([pos[:self.num_agents], pos[:self.num_agents] + target_vel[:self.num_agents]], dim=1).cpu().numpy()
+                    self.gym.add_lines(
+                        self.viewer, 
+                        self.envs[0], 
+                        self.num_agents, 
+                        points,
+                        [1, 0, 0])
+                rpms = self.controller.compute_control(
+                    self.TIME_STEP,
+                    pos, quat, vel, angvel,
+                    pos,
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                    target_vel,
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                )[0]
+                return rpms.view(self.num_envs, self.num_agents, 4)
+            self.act_processor = act_processor
+        elif act_type == "multi_discrete":
+            self.act_space = spaces.Tuple([spaces.Discrete(3)] * 3 * self.num_agents) if self.joint_space else spaces.Tuple([spaces.Discrete(3)] * 3)
+            def act_processor(actions: Tensor) -> Tensor:
+                pos, quat, vel, angvel = self.quadrotor_states.flatten(end_dim=-2)
+                target_vel = (actions.reshape(-1, 3) - 1)
+                if self.viewer:
+                    points = torch.cat([pos[:self.num_agents], pos[:self.num_agents] + target_vel[:self.num_agents]], dim=1).cpu().numpy()
+                    self.gym.add_lines(
+                        self.viewer, 
+                        self.envs[0], 
+                        self.num_agents, 
+                        points,
+                        [1, 0, 0])
+                rpms = self.controller.compute_control(
+                    self.TIME_STEP,
+                    pos, quat, vel, angvel,
+                    pos,
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                    target_vel,
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                )[0]
+                return rpms.view(self.num_envs, self.num_agents, 4)
+            self.act_processor = act_processor
+        elif act_type == "rpm":
+            ones = np.ones(4 * self.num_agents) if self.joint_space else np.ones(4)
+            self.act_space = spaces.Box(-ones, ones)
+            def act_processor(actions: Tensor) -> Tensor:
+                return self.HOVER_RPM * (1+0.05*actions)
+            self.act_processor = act_processor
+        elif act_type == "shortcut":
+            self.act_space = spaces.Box(-1, 1, shape=(self.num_agents, ))
+            def act_processor(actions: Tensor) -> Tensor:
+                pos, quat, vel, angvel = self.quadrotor_states.flatten(end_dim=-2)
+                target_pos = self.targets.reshape(-1, 3)
+                if self.viewer:
+                    points = torch.cat([pos[:self.num_agents], target_pos[:self.num_agents]], dim=1).cpu().numpy()
+                    self.gym.add_lines(
+                        self.viewer, 
+                        self.envs[0], 
+                        self.num_agents, 
+                        points,
+                        [1, 0, 0])
+
+                rpms = self.controller.compute_control(
+                    self.TIME_STEP,
+                    pos, quat, vel, angvel,
+                    target_pos,
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                    torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
+                )[0]
+                return rpms.view(self.num_envs, self.num_agents, 4)
+            self.act_processor = act_processor
+        else:
+            raise NotImplementedError(act_type)
+
 # @torch.jit.script
 def compute_quadcopter_reward(
         root_positions: Tensor, 

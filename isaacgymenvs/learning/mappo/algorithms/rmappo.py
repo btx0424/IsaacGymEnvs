@@ -1,47 +1,87 @@
-import numpy as np
-import time
-import math
-
+from .r_actor_critic import R_Actor, R_Critic
+import gym
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torch.optim as optim
-
-from onpolicy.utils.util import get_gard_norm, huber_loss, mse_loss
+from dataclasses import dataclass
+from torch.nn.functional import mse_loss
+import math
 from isaacgymenvs.learning.mappo.utils.valuenorm import ValueNorm
-from onpolicy.algorithms.utils.util import check
 
-class R_MAPPO():
-    def __init__(self,
-                 args,
-                 policy,
-                 device=torch.device("cpu")):
+@dataclass
+class MAPPOPolicyConfig:
+    pass
+#     # ppo
+#     ppo_epoch: int
+#     clip_param: 
+#     num_mini_batch:
+#     data_chunk_length:
 
-        self.device = device
-        self.tpdv = dict(dtype=torch.float32, device=device)
-        self.policy = policy
+#     # actor
 
-        self.clip_param = args.clip_param
-        self.ppo_epoch = args.ppo_epoch
-        self.num_mini_batch = args.num_mini_batch
-        self.data_chunk_length = args.data_chunk_length
-        self.policy_value_loss_coef = args.policy_value_loss_coef
-        self.value_loss_coef = args.value_loss_coef
-        self.entropy_coef = args.entropy_coef
-        self.max_grad_norm = args.max_grad_norm       
-        self.huber_delta = args.huber_delta
+#     # optimizers
+#     actor_lr: float
+#     critic_lr: float
+#     weight_decay: float
+#     device: torch.device
 
-        self._use_recurrent_policy = args.use_recurrent_policy
-        self._use_naive_recurrent = args.use_naive_recurrent_policy
-        self._use_max_grad_norm = args.use_max_grad_norm
-        self._use_clipped_value_loss = args.use_clipped_value_loss
-        self._use_huber_loss = args.use_huber_loss
-        self._use_popart = args.use_popart
-        self._use_valuenorm = args.use_valuenorm
-        self._use_value_active_masks = args.use_value_active_masks
-        self._use_policy_active_masks = args.use_policy_active_masks
-        self._use_policy_vhead = args.use_policy_vhead
-        
+def update_linear_schedule(optimizer, epoch, total_num_epochs, initial_lr):
+    """Decreases the learning rate linearly"""
+    lr = initial_lr - (initial_lr * (epoch / float(total_num_epochs)))
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+def huber_loss(e, d):
+    a = (abs(e) <= d).float()
+    b = (e > d).float()
+    return a*e**2/2 + b*d*(abs(e)-d/2)
+
+def get_gard_norm(it):
+    sum_grad = 0
+    for x in it:
+        if x.grad is None:
+            continue
+        sum_grad += x.grad.norm() ** 2
+    return math.sqrt(sum_grad)
+
+class MAPPOPolicy:
+    def __init__(self, 
+            cfg: MAPPOPolicyConfig,
+            obs_space: gym.Space,
+            state_space: gym.Space,
+            act_space: gym.Space) -> None:
+        cfg.device = "cuda"
+        cfg.actor_lr = cfg.lr
+        self.device = cfg.device
+
+        # ppo
+        self.clip_param = cfg.clip_param
+        self.ppo_epoch = cfg.ppo_epoch
+        self.num_mini_batch = cfg.num_mini_batch
+        self.data_chunk_length = cfg.data_chunk_length
+        self.policy_value_loss_coef = cfg.policy_value_loss_coef
+        self.value_loss_coef = cfg.value_loss_coef
+        self.entropy_coef = cfg.entropy_coef
+        self.max_grad_norm = cfg.max_grad_norm       
+        self.huber_delta = cfg.huber_delta
+
+        self._use_recurrent_policy = cfg.use_recurrent_policy
+        self._use_naive_recurrent = cfg.use_naive_recurrent_policy
+        self._use_max_grad_norm = cfg.use_max_grad_norm
+        self._use_clipped_value_loss = cfg.use_clipped_value_loss
+        self._use_huber_loss = cfg.use_huber_loss
+        self._use_popart = cfg.use_popart
+        self._use_valuenorm = cfg.use_valuenorm
+        self._use_value_active_masks = cfg.use_value_active_masks
+        self._use_policy_active_masks = cfg.use_policy_active_masks
+        self._use_policy_vhead = cfg.use_policy_vhead
+
+        # policy models
+        self.actor = R_Actor(cfg, obs_space, act_space, self.device)
+        self.critic = R_Critic(cfg, state_space, self.device)
+
+        self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.actor_lr, weight_decay=cfg.weight_decay)
+        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.critic_lr, weight_decay=cfg.weight_decay)
+
         assert (self._use_popart and self._use_valuenorm) == False, ("self._use_popart and self._use_valuenorm can not be set True simultaneously")
         
         if self._use_popart:
@@ -57,6 +97,28 @@ class R_MAPPO():
             if self._use_policy_vhead:
                 self.policy_value_normalizer = None
 
+    def lr_decay(self, episode, episodes):
+        update_linear_schedule(self.actor_optimizer, episode, episodes, self.lr)
+        update_linear_schedule(self.critic_optimizer, episode, episodes, self.critic_lr)
+
+    def get_actions(self, share_obs, obs, rnn_states_actor, rnn_states_critic, masks, available_actions=None, deterministic=False):
+        actions, action_log_probs, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
+        values, rnn_states_critic = self.critic(share_obs, rnn_states_critic, masks)
+        return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
+
+    def get_values(self, share_obs, rnn_states_critic, masks):
+        values, critic_states = self.critic(share_obs, rnn_states_critic, masks)
+        return values
+
+    def evaluate_actions(self, share_obs, obs, rnn_states_actor, rnn_states_critic, action, masks, available_actions=None, active_masks=None):
+        action_log_probs, dist_entropy, policy_values = self.actor.evaluate_actions(obs, rnn_states_actor, action, masks, available_actions, active_masks)
+        values, _ = self.critic(share_obs, rnn_states_critic, masks)
+        return values, action_log_probs, dist_entropy, policy_values
+
+    def act(self, obs, rnn_states_actor, masks, available_actions=None, deterministic=False):
+        actions, _, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
+        return actions, rnn_states_actor
+    
     def cal_value_loss(self, value_normalizer, values, value_preds_batch, return_batch, active_masks_batch):
         value_pred_clipped = value_preds_batch + (values - value_preds_batch).clamp(-self.clip_param, self.clip_param)
         
@@ -93,14 +155,8 @@ class R_MAPPO():
         value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
         adv_targ, available_actions_batch = sample
 
-        # old_action_log_probs_batch = check(old_action_log_probs_batch).to(**self.tpdv)
-        # adv_targ = check(adv_targ).to(**self.tpdv)
-        # value_preds_batch = check(value_preds_batch).to(**self.tpdv)
-        # return_batch = check(return_batch).to(**self.tpdv)
-        # active_masks_batch = check(active_masks_batch).to(**self.tpdv)
-
         # Reshape to do in a single forward pass for all steps
-        values, action_log_probs, dist_entropy, policy_values = self.policy.evaluate_actions(share_obs_batch,
+        values, action_log_probs, dist_entropy, policy_values = self.evaluate_actions(share_obs_batch,
                                                                               obs_batch, 
                                                                               rnn_states_batch, 
                                                                               rnn_states_critic_batch, 
@@ -125,34 +181,34 @@ class R_MAPPO():
         else:
             policy_loss = policy_action_loss
 
-        self.policy.actor_optimizer.zero_grad()
+        self.actor_optimizer.zero_grad()
 
         if turn_on:
             (policy_loss - dist_entropy * self.entropy_coef).backward()
 
         if self._use_max_grad_norm:
-            actor_grad_norm = nn.utils.clip_grad_norm_(self.policy.actor.parameters(), self.max_grad_norm)
+            actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
         else:
-            actor_grad_norm = get_gard_norm(self.policy.actor.parameters())
+            actor_grad_norm = get_gard_norm(self.actor.parameters())
 
-        self.policy.actor_optimizer.step()
+        self.actor_optimizer.step()
 
         # critic update
         value_loss = self.cal_value_loss(self.value_normalizer, values, value_preds_batch, return_batch, active_masks_batch)
 
-        self.policy.critic_optimizer.zero_grad()
+        self.critic_optimizer.zero_grad()
 
         (value_loss * self.value_loss_coef).backward()
 
         if self._use_max_grad_norm:
-            critic_grad_norm = nn.utils.clip_grad_norm_(self.policy.critic.parameters(), self.max_grad_norm)
+            critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
         else:
-            critic_grad_norm = get_gard_norm(self.policy.critic.parameters())
+            critic_grad_norm = get_gard_norm(self.critic.parameters())
 
-        self.policy.critic_optimizer.step()
+        self.critic_optimizer.step()
 
         return value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, ratio
-
+        
     def train(self, buffer, turn_on=True):
         if self._use_popart or self._use_valuenorm:
             advantages: torch.Tensor = buffer.returns[:-1] - self.value_normalizer.denormalize(buffer.value_preds[:-1])
@@ -204,9 +260,9 @@ class R_MAPPO():
         return train_info
 
     def prep_training(self):
-        self.policy.actor.train()
-        self.policy.critic.train()
+        self.actor.train()
+        self.critic.train()
 
     def prep_rollout(self):
-        self.policy.actor.eval()
-        self.policy.critic.eval()
+        self.actor.eval()
+        self.critic.eval()

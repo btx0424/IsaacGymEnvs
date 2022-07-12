@@ -27,11 +27,8 @@ rl_device: 'cuda:0'
 graphics_device_id: 0
 
 params:
-  act_mix: 1.0
-  act_type: vel
+  sde: False
   activation_id: 1
-  agg_act_steps: 2
-  agg_phy_steps: 4
   algorithm_name: mappo
   attn_N: 1
   attn_heads: 4
@@ -48,9 +45,7 @@ params:
   dropout: 0.0
   entropy_coef: 0.01
   env_name: StarCraft2
-  episode_len_sec: 15
-  episode_length: 8
-  episodes_per_update: 4
+  episode_length: 16
   eval_episodes: 32
   eval_interval: 25
   experiment_name: check
@@ -65,12 +60,8 @@ params:
   layer_N: 1
   log_interval: 5
   lr: 0.0005
-  map: square
   max_grad_norm: 10.0
-  max_vel: 2.0
   metric_T: 5
-  min_vel: 0.0
-  mlp_hidden_size: 64
   model_dir: null
   n_eval_rollout_threads: 1
   n_render_rollout_threads: 1
@@ -78,8 +69,6 @@ params:
   n_training_threads: 1
   num_env_steps: 500000000.0
   num_mini_batch: 1
-  num_predators: 2
-  num_preys: 1
   opti_eps: 1.0e-05
   policy_value_loss_coef: 1
   ppo_epoch: 5
@@ -89,7 +78,6 @@ params:
   restart_p: 0.7
   save_gifs: false
   save_interval: 1
-  sde: false
   seed: 1
   share_policy: true
   sigma_max: 0.9
@@ -129,7 +117,6 @@ params:
   use_states_clip: false
   use_value_active_masks: true
   use_valuenorm: true
-  use_vel_cl: false
   use_wandb: true
   user_name: zoeyuchao
   value_loss_coef: 1

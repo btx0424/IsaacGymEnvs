@@ -3,14 +3,17 @@ params:
 
   algo:
     name: a2c_continuous
+    # name: a2c_discrete
 
   model:
     name: continuous_a2c_logstd
+    # name: multi_discrete_a2c
 
   network:
     name: actor_critic
     separate: True
     space:
+      # multi_discrete:
       continuous:
         mu_activation: None
         sigma_activation: None
