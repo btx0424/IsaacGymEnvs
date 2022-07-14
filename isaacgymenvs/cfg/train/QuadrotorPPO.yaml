@@ -63,10 +63,11 @@ params:
     entropy_coef: 0.0
     truncate_grads: True
     e_clip: 0.2
-    horizon_length: 8
-    minibatch_size: 16384
+    horizon_length: 16
+    minibatch_size: 65536
     mini_epochs: 8
     critic_coef: 2
     clip_value: True
     seq_len: 4
     bounds_loss_coef: 0.0001
+    device: ${....rl_device}

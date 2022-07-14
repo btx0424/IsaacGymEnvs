@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import time
 import torch
 import os
 import math
@@ -71,8 +72,8 @@ class QuadrotorBase(MultiAgentVecTask):
         self.max_episode_length = self.cfg["env"]["maxEpisodeLength"]
 
         if self.viewer:
-            cam_pos = gymapi.Vec3(-1.0, -1.0, 1.8)
-            cam_target = gymapi.Vec3(2.2, 2.0, 1.0)
+            cam_pos = gymapi.Vec3(-1.5, -1.0, 1.8)
+            cam_target = gymapi.Vec3(0, 0, 0.2)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
         # TODO: 
@@ -115,6 +116,11 @@ class QuadrotorBase(MultiAgentVecTask):
 
         self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
         self.create_act_space_and_processor(self.act_type)
+
+    def allocate_buffers(self):
+        super().allocate_buffers()
+        self.success_buf = torch.zeros(
+            (self.num_envs, self.num_agents), device=self.device)
 
     def create_sim(self):
         self.sim_params.up_axis = gymapi.UP_AXIS_Z
@@ -177,7 +183,8 @@ class QuadrotorBase(MultiAgentVecTask):
 
             for i_agent in range(self.num_agents):
                 drone_handle = self.gym.create_actor(env, asset, drone_pose, f"cf2x_{i_agent}", i_env, 0)
-                drone_pose.p.x += 0.1
+                drone_pose.p.x += 0.15
+                drone_pose.p.y += 0.15
                 drone_pose.p.z += 0.1
                 sphere_handle = self.gym.create_actor(env, sphere_asset, sphere_pose, f"sphere_{i_agent}", i_env, 1)
                 if i_env == 0:
@@ -235,6 +242,7 @@ class QuadrotorBase(MultiAgentVecTask):
         self.reset_buf[env_ids] = 0
         self.progress_buf[env_ids] = 0
         self.cum_rew_buf[env_ids] = 0
+        self.success_buf[env_ids] = 0
 
         self.controller.reset_idx(env_ids, self.num_envs) # TODO: fix reset
 
@@ -262,7 +270,8 @@ class QuadrotorBase(MultiAgentVecTask):
     def post_physics_step(self):
         self.progress_buf += 1
 
-        rad = (self.progress_buf.unsqueeze(-1)+torch.arange(self.num_agents, device=self.rl_device)*2)/self.max_episode_length*math.pi*2
+        spacing = torch.linspace(0, self.max_episode_length, self.num_agents+1, device=self.device)[:-1]
+        rad = (self.progress_buf.unsqueeze(-1)+spacing)/self.max_episode_length*math.pi*2
         self.targets[..., 0] = torch.sin(rad)
         self.targets[..., 1] = torch.cos(rad)
 
@@ -298,6 +307,10 @@ class QuadrotorBase(MultiAgentVecTask):
             self.reset_buf, self.progress_buf, self.max_episode_length
         )
         self.cum_rew_buf.add_(self.rew_buf)
+
+        distance = torch.norm(self.targets-self.quadrotor_pos, dim=-1)
+        self.success_buf[distance > 0.25] = 0
+        self.success_buf[distance < 0.25] += 1
         
     def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
         actions = actions.view(self.num_envs, self.num_agents, -1)
@@ -307,7 +320,8 @@ class QuadrotorBase(MultiAgentVecTask):
         self.obs_processor(obs_dict)
         info["cum_rew"] = self.cum_rew_buf
         info["step"] = self.progress_buf
-
+        info["success"] = self.success_buf > 50
+        
         # rl_games
         return obs_dict["obs"].flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info # TODO: check mappo and remove .clone()
         # mappo
