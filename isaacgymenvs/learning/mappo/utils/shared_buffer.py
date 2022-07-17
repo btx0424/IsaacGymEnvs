@@ -1,4 +1,4 @@
-from typing import Sequence
+from typing import Sequence, Tuple
 import torch
 import numpy as np
 import gym
@@ -13,14 +13,29 @@ def _flatten(T, N, x: torch.Tensor):
 def _cast(x: torch.Tensor):
     return x.permute(1, 2, 0, 3).reshape(-1, *x.shape[3:])
 
+def create_buffer(space: spaces.Space, base_shape: Tuple[int,...], device="cuda"):
+    if isinstance(space, spaces.Dict):
+        return {k: create_buffer(v) for k, v in space.items()}
+    elif isinstance(space, spaces.Box):
+        return torch.zeros(base_shape+space.shape, device=device)
+    elif isinstance(space, spaces.Discrete):
+        return torch.zeros(base_shape+(space.n, ), device=device)
+    elif isinstance(space, spaces.MultiDiscrete):
+        return torch.zeros(base_shape+tuple(space.nvec), device=device)
+    else:
+        raise TypeError(f"Unsupported space type: {type(space)}")
+
 class SharedReplayBuffer(object):
     def __init__(self, args, num_agents, 
             obs_space: gym.Space, 
             share_obs_space: gym.Space, 
             act_space: gym.Space, 
             device="cuda"):
-        self.episode_length = args.episode_length
+
+        self.num_steps = args.num_steps
         self.num_envs = args.n_rollout_threads
+        self.num_agents = num_agents
+
         self.hidden_size = args.hidden_size
         self.recurrent_N = args.recurrent_N
         self.gamma = args.gamma
@@ -35,51 +50,33 @@ class SharedReplayBuffer(object):
         obs_shape = get_shape_from_obs_space(obs_space)
         share_obs_shape = get_shape_from_obs_space(share_obs_space)
 
-        # for mixed observation
-        if 'Dict' in obs_shape.__class__.__name__:
-            self._mixed_obs = True
-            
-            self.obs = {}
-            self.share_obs = {}
-
-            for key in obs_shape:
-                self.obs[key] = torch.zeros((self.episode_length + 1, self.num_envs, num_agents, *obs_shape[key].shape), dtype=torch.float32)
-            for key in share_obs_shape:
-                self.share_obs[key] = torch.zeros((self.episode_length + 1, self.num_envs, num_agents, *share_obs_shape[key].shape), dtype=torch.float32)
+        base_shape = (self.num_steps + 1, self.num_envs, self.num_agents)
         
-        else: 
-            # deal with special attn format   
-            if isinstance(obs_shape[-1], Sequence):
-                obs_shape = obs_shape[:1]
+        self.obs = create_buffer(obs_space, base_shape, device)
+        self.share_obs = create_buffer(share_obs_space, base_shape, device)
 
-            if isinstance(share_obs_shape[-1], Sequence):
-                share_obs_shape = share_obs_shape[:1]
-
-            self.share_obs = torch.zeros((self.episode_length + 1, self.num_envs, num_agents, *share_obs_shape), dtype=torch.float32)
-            self.obs = torch.zeros((self.episode_length + 1, self.num_envs, num_agents, *obs_shape), dtype=torch.float32)
-
-        self.rnn_states = torch.zeros((self.episode_length + 1, self.num_envs, num_agents, self.recurrent_N, self.hidden_size), device=device)
+        self.rnn_states = torch.zeros((self.num_steps + 1, self.num_envs, num_agents, self.recurrent_N, self.hidden_size), device=device)
         self.rnn_states_critic = torch.zeros_like(self.rnn_states)
        
         self.value_preds = torch.zeros(
-            (self.episode_length + 1, self.num_envs, num_agents, 1), device=device)
+            (self.num_steps + 1, self.num_envs, num_agents, 1), device=device)
         self.returns = torch.zeros_like(self.value_preds)
                
         if act_space.__class__.__name__ == 'Discrete':
-            self.available_actions = torch.ones((self.episode_length + 1, self.num_envs, num_agents, act_space.n), device=device)
+            self.available_actions = torch.ones((self.num_steps + 1, self.num_envs, num_agents, act_space.n), device=device)
         else:
             self.available_actions = None
 
         act_shape = get_shape_from_act_space(act_space)
 
         self.actions = torch.zeros(
-            (self.episode_length, self.num_envs, num_agents, act_shape), device=device)
+            (self.num_steps, self.num_envs, num_agents, act_shape), device=device)
         self.action_log_probs = torch.zeros(
-            (self.episode_length, self.num_envs, num_agents, act_shape), device=device)
+            (self.num_steps, self.num_envs, num_agents, act_shape), device=device)
         self.rewards = torch.zeros(
-            (self.episode_length, self.num_envs, num_agents, 1), device=device)
+            (self.num_steps, self.num_envs, num_agents, 1), device=device)
 
-        self.masks = torch.ones((self.episode_length + 1, self.num_envs, num_agents, 1), device=device)
+        self.masks = torch.ones((self.num_steps + 1, self.num_envs, num_agents, 1), device=device)
         self.bad_masks = torch.ones_like(self.masks)
         self.active_masks = torch.ones_like(self.masks)
 
@@ -111,7 +108,7 @@ class SharedReplayBuffer(object):
         if available_actions is not None:
             self.available_actions[self.step + 1] = available_actions
 
-        self.step = (self.step + 1) % self.episode_length
+        self.step = (self.step + 1) % self.num_steps
 
     def chooseinsert(self, share_obs, obs, rnn_states, rnn_states_critic, actions, action_log_probs,
                      value_preds, rewards, masks, bad_masks=None, active_masks=None, available_actions=None):
@@ -131,7 +128,7 @@ class SharedReplayBuffer(object):
         if available_actions is not None:
             self.available_actions[self.step] = available_actions
 
-        self.step = (self.step + 1) % self.episode_length
+        self.step = (self.step + 1) % self.num_steps
 
     def after_update(self):
         if self._mixed_obs:
@@ -161,7 +158,7 @@ class SharedReplayBuffer(object):
             if self._use_gae:
                 self.value_preds[-1] = next_value
                 gae = 0
-                for step in reversed(range(self.rewards.shape[0])):
+                for step in reversed(range(self.num_steps)):
                     if self._use_popart or self._use_valuenorm:
                         # step + 1
                         delta = self.rewards[step] + self.gamma * value_normalizer.denormalize(self.value_preds[step + 1]) * self.masks[step + 1]  \
@@ -176,7 +173,7 @@ class SharedReplayBuffer(object):
                         self.returns[step] = gae + self.value_preds[step]
             else:
                 self.returns[-1] = next_value
-                for step in reversed(range(self.rewards.shape[0])):
+                for step in reversed(range(self.num_steps)):
                     if self._use_popart or self._use_valuenorm:
                         self.returns[step] = (self.returns[step + 1] * self.gamma * self.masks[step + 1] + self.rewards[step]) * self.bad_masks[step + 1] \
                                             + (1 - self.bad_masks[step + 1]) * value_normalizer.denormalize(self.value_preds[step]) 
@@ -187,7 +184,7 @@ class SharedReplayBuffer(object):
             if self._use_gae:
                 self.value_preds[-1] = next_value
                 gae = 0
-                for step in reversed(range(self.episode_length)):
+                for step in reversed(range(self.num_steps)):
                     if self._use_popart or self._use_valuenorm:
                         delta = self.rewards[step] + self.gamma * value_normalizer.denormalize(self.value_preds[step + 1]) * self.masks[step + 1] \
                             - value_normalizer.denormalize(self.value_preds[step])
@@ -203,15 +200,15 @@ class SharedReplayBuffer(object):
                     self.returns[step] = self.returns[step + 1] * self.gamma * self.masks[step + 1] + self.rewards[step]
 
     def feed_forward_generator(self, advantages, num_mini_batch=None, mini_batch_size=None):
-        episode_length, num_envs, num_agents = self.rewards.shape[0:3]
-        batch_size = num_envs * episode_length * num_agents
+        num_steps, num_envs, num_agents = self.rewards.shape[0:3]
+        batch_size = num_envs * num_steps * num_agents
 
         if mini_batch_size is None:
             assert batch_size >= num_mini_batch, (
                 "PPO requires the number of processes ({}) "
                 "* number of steps ({}) * number of agents ({}) = {} "
                 "to be greater than or equal to the number of PPO mini batches ({})."
-                "".format(num_envs, episode_length, num_agents, num_envs * episode_length * num_agents,
+                "".format(num_envs, num_steps, num_agents, num_envs * num_steps * num_agents,
                           num_mini_batch))
             mini_batch_size = batch_size // num_mini_batch
 
@@ -272,7 +269,7 @@ class SharedReplayBuffer(object):
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
 
     def naive_recurrent_generator(self, advantages, num_mini_batch):
-        episode_length, num_envs, num_agents = self.rewards.shape[0:3]
+        num_steps, num_envs, num_agents = self.rewards.shape[0:3]
         batch_size = num_envs*num_agents
         assert num_envs*num_agents >= num_mini_batch, (
             "PPO requires the number of processes ({})* number of agents ({}) "
@@ -346,7 +343,7 @@ class SharedReplayBuffer(object):
                 adv_targ.append(advantages[:, ind])
             
             # [N[T, dim]]
-            T, N = self.episode_length, num_envs_per_batch
+            T, N = self.num_steps, num_envs_per_batch
             # These are all from_numpys of size (T, N, -1)
             if self._mixed_obs:
                 for key in share_obs_batch.keys():
@@ -394,15 +391,15 @@ class SharedReplayBuffer(object):
             yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
 
     def recurrent_generator(self, advantages, num_mini_batch, data_chunk_length):
-        episode_length, num_envs, num_agents = self.rewards.shape[0:3]
-        batch_size = num_envs * episode_length * num_agents
+        num_steps, num_envs, num_agents = self.rewards.shape[0:3]
+        batch_size = num_envs * num_steps * num_agents
         data_chunks = batch_size // data_chunk_length  # [C=r*T*M/L]
         mini_batch_size = data_chunks // num_mini_batch
 
-        assert num_envs * episode_length * num_agents >= data_chunk_length, (
+        assert num_envs * num_steps * num_agents >= data_chunk_length, (
             "PPO requires the number of processes ({})* number of agents ({}) * episode length ({}) "
             "to be greater than or equal to the number of "
-            "data chunk length ({}).".format(num_envs, num_agents, episode_length ,data_chunk_length))
+            "data chunk length ({}).".format(num_envs, num_agents, num_steps ,data_chunk_length))
 
         rand = torch.randperm(data_chunks).numpy()
         sampler = [rand[i*mini_batch_size:(i+1)*mini_batch_size] for i in range(num_mini_batch)]

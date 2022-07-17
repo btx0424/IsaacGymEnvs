@@ -177,22 +177,23 @@ def launch_rlg_hydra(cfg: DictConfig):
     # create runner and set the settings
 
     class DroneObserver(RLGPUAlgoObserver):
-        def after_init(self, algo):
-            super().after_init(algo)
-            self.successes = []
+        ...
+        # def after_init(self, algo):
+        #     super().after_init(algo)
+        #     self.successes = []
         
-        def process_infos(self, infos, done_indices):
-            super().process_infos(infos, done_indices)
-            if len(done_indices) > 0:
-                self.successes.append(infos['success'].flatten()[done_indices])
+        # def process_infos(self, infos, done_indices):
+        #     super().process_infos(infos, done_indices)
+        #     if len(done_indices) > 0:
+        #         self.successes.append(infos['success'].flatten()[done_indices])
 
-        def after_print_stats(self, frame, epoch_num, total_time):
-            if len(self.successes) > 0:
-                success_rate = torch.cat(self.successes).float().mean()
-                self.direct_info["success_rate"] = success_rate
-                print(f"Success rate: {success_rate:.2%}")
-            super().after_print_stats(frame, epoch_num, total_time)
-            self.successes.clear()
+        # def after_print_stats(self, frame, epoch_num, total_time):
+        #     if len(self.successes) > 0:
+        #         success_rate = torch.cat(self.successes).float().mean()
+        #         self.direct_info["success_rate"] = success_rate
+        #         print(f"Success rate: {success_rate:.2%}")
+        #     super().after_print_stats(frame, epoch_num, total_time)
+        #     self.successes.clear()
 
     runner = build_runner(DroneObserver())
     runner.load(rlg_config_dict)

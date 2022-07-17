@@ -1,7 +1,9 @@
+import gym
 import hydra
 import isaacgym
 import torch
 import wandb
+import datetime
 import setproctitle
 from isaacgymenvs.tasks import isaacgym_task_map
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
@@ -24,18 +26,63 @@ def create_envs(cfg) -> MultiAgentVecTask:
 @hydra.main(config_name="mappo", config_path="./cfg")
 def main(cfg):
     OmegaConf.set_struct(cfg, False)
-    env: MultiAgentVecTask = create_envs(cfg)
-    env.obs_space = [env.obs_space] * env.num_agents
-    env.act_space = [env.act_space] * env.num_agents
-    env.share_observation_space = env.obs_space
-    print(env)
+    time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    run_name = f"{cfg.wandb_name}/mappo_{time_str}"
+
+    envs: MultiAgentVecTask = create_envs(cfg)
+    if cfg.capture_video:
+        envs.is_vector_env = True
+        class MultiAgentRecordVideo(gym.wrappers.RecordVideo):
+
+            def step(self, action):
+                observations, rewards, dones, infos = super().step(action)
+                
+                # increment steps and episodes
+                self.step_id += 1
+
+                env_done = dones.reshape(self.num_envs, self.num_agents)[0].all()
+                if env_done:
+                    self.episode_id += 1
+
+                if self.recording:
+                    self.video_recorder.capture_frame()
+                    self.recorded_frames += 1
+                    if self.video_length > 0:
+                        if self.recorded_frames > self.video_length:
+                            self.close_video_recorder()
+                    elif env_done:
+                        self.close_video_recorder()
+
+                elif self._video_enabled():
+                    self.start_video_recorder()
+
+                return observations, rewards, dones, infos
+
+        envs = MultiAgentRecordVideo(
+            envs,
+            f"videos/{run_name}",
+            episode_trigger=lambda ep_id: ep_id % cfg.capture_video_freq == 0,
+            video_length=cfg.capture_video_len,
+        )
+    print(envs)
 
     config = {
+        "cfg": cfg,
         "all_args": cfg.params,
-        "envs": env,
+        "envs": envs,
         "device": "cuda",
-        "num_agents":cfg.task.env.numAgents,
     }
+
+    run = wandb.init(
+        project=cfg.wandb_project,
+        group=cfg.wandb_group,
+        entity=cfg.wandb_entity,
+        config=cfg,
+        sync_tensorboard=True,
+        name=run_name,
+        resume="allow",
+    )
+
     runner = DroneRunner(config)
     runner.run()
 

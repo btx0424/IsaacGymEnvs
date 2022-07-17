@@ -76,11 +76,6 @@ class QuadrotorBase(MultiAgentVecTask):
             cam_target = gymapi.Vec3(0, 0, 0.2)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
-        # TODO: 
-        # 1. think of a better way to allocate buffers & set spaces
-        # 2. do we really need a buffer? test performance on this
-        # 3. where to do normalization ...
-
         # MLP obs without obstacles
         # num_obs = 13 * self.num_agents + self.num_agents + 3
         num_obs = 13 + 3
@@ -97,6 +92,7 @@ class QuadrotorBase(MultiAgentVecTask):
             obs_dict["obs"] = torch.cat([target_offset, obs], dim=-1)
             return obs_dict
         self.obs_processor = obs_processor
+        self.state_space = self.obs_space
 
         # attention obs with obstacles
         # maybe a dict is better?
@@ -309,8 +305,9 @@ class QuadrotorBase(MultiAgentVecTask):
         self.cum_rew_buf.add_(self.rew_buf)
 
         distance = torch.norm(self.targets-self.quadrotor_pos, dim=-1)
-        self.success_buf[distance > 0.25] = 0
-        self.success_buf[distance < 0.25] += 1
+        radius = 0.3
+        self.success_buf[distance > radius] = 0
+        self.success_buf[distance < radius] += 1
         
     def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
         actions = actions.view(self.num_envs, self.num_agents, -1)
@@ -318,14 +315,15 @@ class QuadrotorBase(MultiAgentVecTask):
         obs_dict, reward, done, info = super().step(actions)
         
         self.obs_processor(obs_dict)
-        info["cum_rew"] = self.cum_rew_buf
-        info["step"] = self.progress_buf
-        info["success"] = self.success_buf > 50
+
+        info["episode"] ={
+            "reward": self.cum_rew_buf,
+            "success": (self.success_buf > 50).float(),
+            "length": self.progress_buf,
+        }
         
         # rl_games
         return obs_dict["obs"].flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info # TODO: check mappo and remove .clone()
-        # mappo
-        return obs_dict["obs"], reward.clone(), done, info
 
     def reset(self):
         self.targets = self.quadrotor_pos.clone()

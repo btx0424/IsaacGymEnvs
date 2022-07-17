@@ -5,7 +5,9 @@ task_name: ${task.name}
 experiment: ''
 
 # if set to positive integer, overrides the default number of environments
-num_envs: ''
+num_envs: 8192
+num_agents: ${task.env.numAgents}
+log_interval: 5
 
 # seed - set to -1 to choose random seed
 seed: 42
@@ -13,7 +15,8 @@ seed: 42
 torch_deterministic: False
 
 # set the maximum number of learning iterations to train for. overrides default per-environment setting
-max_iterations: ''
+max_iterations: 500
+max_env_steps: 50_000_000
 
 ## Device config
 #  'physx' or 'flex'
@@ -27,25 +30,35 @@ rl_device: 'cuda:0'
 graphics_device_id: 0
 
 params:
-  sde: False
+  # ppo
+  num_steps: 16
+  num_mini_batch: 16 
+  ppo_epoch: 5
+  clip_param: 0.2
+  entropy_coef: 0.01
+
+  # network
   activation_id: 1
-  algorithm_name: mappo
   attn_N: 1
   attn_heads: 4
   attn_size: 64
+  layer_N: 3
+  hidden_size: 128
+  lr: 0.0005
+  critic_lr: 0.0005
+  recurrent_N: 1
+
+  sde: False
+  algorithm_name: mappo
   aux_epoch: 5
   buffer_length: 10000
-  clip_param: 0.2
   clone_coef: 1.0
   cnn_layers_params: null
-  critic_lr: 0.0005
   cuda: true
   cuda_deterministic: true
   data_chunk_length: 10
   dropout: 0.0
-  entropy_coef: 0.01
   env_name: StarCraft2
-  episode_length: 16
   eval_episodes: 32
   eval_interval: 25
   experiment_name: check
@@ -53,13 +66,10 @@ params:
   gae_lambda: 0.95
   gain: 0.01
   gamma: 0.99
-  hidden_size: 64
   huber_delta: 10.0
   ifi: 0.1
   influence_layer_N: 1
-  layer_N: 1
   log_interval: 5
-  lr: 0.0005
   max_grad_norm: 10.0
   metric_T: 5
   model_dir: null
@@ -68,11 +78,8 @@ params:
   n_rollout_threads: ${task.env.numEnvs}
   n_training_threads: 1
   num_env_steps: 500000000.0
-  num_mini_batch: 1
   opti_eps: 1.0e-05
   policy_value_loss_coef: 1
-  ppo_epoch: 5
-  recurrent_N: 1
   render_episodes: 5
   restart_easy: 0.2
   restart_p: 0.7
@@ -123,15 +130,15 @@ params:
   wandb_name: zoeyuchao
   weight_decay: 0
 
-wandb_activate: False
+wandb_activate: True
 wandb_group: ''
-wandb_name: ${train.params.config.name}
+wandb_name: ${task.name}
 wandb_entity: ''
 wandb_project: 'isaacgymenvs'
-capture_video: False
-capture_video_freq: 1464
-capture_video_len: 100
-force_render: True
+capture_video: True
+capture_video_freq: 10
+capture_video_len: ${task.env.maxEpisodeLength}
+force_render: False
 
 # disables rendering
 headless: False
