@@ -752,6 +752,8 @@ class VecTask(Env):
 
 class MultiAgentVecTask(VecTask):
     def __init__(self, config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
+        self.num_rewards = config["env"].get("numRewards", 1)
+        
         super().__init__(config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         
         ones = np.ones((self.num_agents, self.num_obs))
@@ -759,6 +761,8 @@ class MultiAgentVecTask(VecTask):
         ones = np.ones((self.num_agents, self.num_actions))
         self.act_space = spaces.Box(-ones, ones)
         
+        self.reward_space = spaces.Box(-np.inf, np.inf, shape=(self.num_rewards,))
+
     def allocate_buffers(self):
         # allocate buffers
         self.obs_buf = torch.zeros(
@@ -766,7 +770,7 @@ class MultiAgentVecTask(VecTask):
         self.states_buf = torch.zeros(
             (self.num_envs, self.num_agents, self.num_states), device=self.device, dtype=torch.float)
         self.rew_buf = torch.zeros(
-            (self.num_envs, self.num_agents), device=self.device, dtype=torch.float)
+            (self.num_envs, self.num_agents, self.num_rewards), device=self.device, dtype=torch.float)
         self.cum_rew_buf = torch.zeros_like(self.rew_buf)
 
         self.reset_buf = torch.ones(

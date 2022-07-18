@@ -3,6 +3,7 @@ from dataclasses import dataclass
 import time
 from typing import Dict
 from isaacgymenvs.learning.mappo.algorithms.rmappo import MAPPOPolicy
+from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 import wandb
 import os
 import numpy as np
@@ -20,12 +21,9 @@ class Runner(object):
     def __init__(self, config):
 
         self.all_args = config['all_args']
-        self.envs = config['envs']
+        self.envs: MultiAgentVecTask = config['envs']
         # self.eval_envs = config['eval_envs']
-        self.device = config['device']
-        
-        if config.__contains__("render_envs"):
-            self.render_envs = config['render_envs']       
+        self.device = config['device']     
 
         # parameters
         self.use_centralized_V = self.all_args.use_centralized_V

@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 import time
+from pyrsistent import s
 import torch
 import os
 import math
@@ -14,11 +15,15 @@ from collections import defaultdict
 from .controller import DSLPIDControl
 from ..base.vec_task import MultiAgentVecTask
 
-class TensorDict(dict):
+class TensorDict(Dict[str, Tensor]):
     def reshape(self, *shape: int):
         for key, value in self.items():
             self[key] = value.reshape(*shape)
         return self
+
+    def flatten(self, start_dim: int = 0, end_dim: int = -1):
+        return TensorDict({key: value.flatten(start_dim, end_dim) for key, value in self.items()})
+    
 
 class TensorTuple(Tuple[torch.Tensor, ...]):
     def reshape(self, *shape: int):
@@ -33,8 +38,14 @@ class QuadrotorBase(MultiAgentVecTask):
         
         cfg["env"]["numObservations"] = 13
         cfg["env"]["numActions"] = 4
+        cfg["env"]["numRewards"] = 4 # [distance, collision, progress, capture]
         
+        # task specification
+        self.capture_radius: float = cfg.get("captureRadius", 0.3)
+        self.success_threshold: int = cfg.get("successThreshold", 50)
+
         self.cfg = cfg
+
         self.actor_types = ["drone", "box", "sphere"]
         self.box_states = torch.tensor([
             [-1, 1, 0.5, 0.1, 0.1, 1.],
@@ -115,7 +126,10 @@ class QuadrotorBase(MultiAgentVecTask):
 
     def allocate_buffers(self):
         super().allocate_buffers()
-        self.success_buf = torch.zeros(
+
+        self.captured_steps_buf = torch.zeros(
+            (self.num_envs, self.num_agents), device=self.device)
+        self.target_distance_buf = torch.zeros(
             (self.num_envs, self.num_agents), device=self.device)
 
     def create_sim(self):
@@ -165,8 +179,8 @@ class QuadrotorBase(MultiAgentVecTask):
         env_body_index = defaultdict(lambda:[])
         sim_actor_index = defaultdict(lambda:[])
 
-        self.MAX_XYZ = torch.tensor([3, 3, 1], device=self.device)
-        self.MIN_XYZ = torch.tensor([-3, -3, 0], device=self.device)
+        self.MAX_XYZ = torch.tensor([spacing, spacing, 1], device=self.device)
+        self.MIN_XYZ = torch.tensor([-spacing, -spacing, 0], device=self.device)
 
         cell_size = 0.4
         grid_shape = ((self.MAX_XYZ - self.MIN_XYZ) / cell_size).int()
@@ -187,7 +201,7 @@ class QuadrotorBase(MultiAgentVecTask):
                     # actor index
                     env_actor_index["drone"].append(
                         self.gym.get_actor_index(env, drone_handle, gymapi.DOMAIN_ENV))
-                    env_actor_index["sphere"].append(
+                    env_actor_index["target"].append(
                         self.gym.get_actor_index(env, sphere_handle, gymapi.DOMAIN_ENV))
                     # body index
                     env_body_index["prop"].extend([
@@ -196,7 +210,7 @@ class QuadrotorBase(MultiAgentVecTask):
                     env_body_index["base"].append(
                         self.gym.get_actor_rigid_body_index(env, drone_handle, 0, gymapi.DOMAIN_ENV))
                 sim_actor_index["drone"].append(self.gym.get_actor_index(env, drone_handle, gymapi.DOMAIN_SIM))
-                sim_actor_index["sphere"].append(self.gym.get_actor_index(env, sphere_handle, gymapi.DOMAIN_SIM))
+                sim_actor_index["target"].append(self.gym.get_actor_index(env, sphere_handle, gymapi.DOMAIN_SIM))
 
             for i_box in range(self.num_boxes):
                 center, half_ext = self.box_states[i_box][:3], self.box_states[i_box][3:]
@@ -238,9 +252,10 @@ class QuadrotorBase(MultiAgentVecTask):
         self.reset_buf[env_ids] = 0
         self.progress_buf[env_ids] = 0
         self.cum_rew_buf[env_ids] = 0
-        self.success_buf[env_ids] = 0
+        self.target_distance_buf[env_ids] = 0
+        self.captured_steps_buf[env_ids] = 0
 
-        self.controller.reset_idx(env_ids, self.num_envs) # TODO: fix reset
+        self.controller.reset_idx(env_ids, self.num_envs)
 
     def pre_physics_step(self, actions: torch.Tensor):
         actions = actions.view(self.num_envs, self.num_agents, 4)
@@ -268,18 +283,18 @@ class QuadrotorBase(MultiAgentVecTask):
 
         spacing = torch.linspace(0, self.max_episode_length, self.num_agents+1, device=self.device)[:-1]
         rad = (self.progress_buf.unsqueeze(-1)+spacing)/self.max_episode_length*math.pi*2
-        self.targets[..., 0] = torch.sin(rad)
-        self.targets[..., 1] = torch.cos(rad)
+        self.target_pos[..., 0] = torch.sin(rad)
+        self.target_pos[..., 1] = torch.cos(rad)
 
         self.refresh_tensors()
         self.compute_observations()
-        self.compute_reward()
+        self.compute_reward_and_reset()
 
-        if hasattr(self, "targets"):
-            self.root_positions[:, self.env_actor_index["sphere"]] = self.targets
-            root_reset_ids = self.sim_actor_index["sphere"].flatten()
-            self.gym.set_actor_root_state_tensor_indexed(
-                self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
+        # if hasattr(self, "targets"):
+        #     self.root_positions[:, self.env_actor_index["sphere"]] = self.targets
+        #     root_reset_ids = self.sim_actor_index["sphere"].flatten()
+        #     self.gym.set_actor_root_state_tensor_indexed(
+        #         self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
         
         if self.viewer:
             self.gym.clear_lines(self.viewer)
@@ -294,48 +309,58 @@ class QuadrotorBase(MultiAgentVecTask):
         self.obs_buf[..., 10:13] = self.root_angvels[:, self.env_actor_index["drone"]] / math.pi
         return self.obs_buf
 
-    def compute_reward(self):
+    def compute_reward_and_reset(self):
         pos, quat, vel, angvel = self.quadrotor_states
             
         contact = self.contact_forces[:, self.env_body_index["base"]]
-        self.rew_buf[:], self.reset_buf[:] = compute_quadcopter_reward(
-            pos, quat, vel, angvel, contact, self.targets,
-            self.reset_buf, self.progress_buf, self.max_episode_length
-        )
-        self.cum_rew_buf.add_(self.rew_buf)
 
-        distance = torch.norm(self.targets-self.quadrotor_pos, dim=-1)
-        radius = 0.3
-        self.success_buf[distance > radius] = 0
-        self.success_buf[distance < radius] += 1
+        target_distance = torch.norm(self.targets-pos, dim=-1)
+        distance_reward = 1.0 / (1.0 + self.target_distance_buf ** 2)
+        collision_penalty = contact.any(-1).float()
+        progress_reward = self.target_distance_buf - target_distance
+
+        captured: Tensor = target_distance < self.capture_radius
+        self.captured_steps_buf[~captured] = 0
+        self.captured_steps_buf[captured] += 1
+
+        self.rew_buf[..., 0] = distance_reward
+        self.rew_buf[..., 1] = collision_penalty
+        self.rew_buf[..., 2] = progress_reward
+        self.rew_buf[..., 3] = captured.float()
         
+        self.cum_rew_buf.add_(self.rew_buf)
+        self.target_distance_buf[:] = target_distance
+        
+        self.reset_buf.zero_()
+        self.reset_buf[target_distance > 3] = 1
+        self.reset_buf[pos[..., 2] < 0.1] = 1
+        self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
+
     def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
         actions = actions.view(self.num_envs, self.num_agents, -1)
         actions = self.act_processor(actions)
+
         obs_dict, reward, done, info = super().step(actions)
-        
+        obs_dict = TensorDict(obs_dict)
         self.obs_processor(obs_dict)
 
         info["episode"] ={
             "reward": self.cum_rew_buf,
-            "success": (self.success_buf > 50).float(),
+            "success": (self.captured_steps_buf > self.success_threshold).float(),
             "length": self.progress_buf,
         }
         
-        # rl_games
-        return obs_dict["obs"].flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info # TODO: check mappo and remove .clone()
+        return obs_dict.flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info # TODO: check mappo and remove .clone()
 
-    def reset(self):
+    def reset(self) -> Dict[str, torch.Tensor]:
         self.targets = self.quadrotor_pos.clone()
         self.targets[..., 2] += 0.5
 
         self.controller.reset()
-        obs_dict = super().reset()
+        obs_dict = TensorDict(super().reset())
         self.obs_processor(obs_dict)
-        # rl_games
-        return obs_dict["obs"].flatten(end_dim=1)
-        # mappo
-        return obs_dict["obs"]
+
+        return obs_dict.flatten(end_dim=1)
 
     def refresh_tensors(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
@@ -348,11 +373,27 @@ class QuadrotorBase(MultiAgentVecTask):
 
     @property
     def quadrotor_pos(self) -> Tensor:
-        return self.root_positions[:, self.env_actor_index["drone"], :3]
+        return self.root_positions[:, self.env_actor_index["drone"]]
 
     @quadrotor_pos.setter
     def quadrotor_pos(self, pos: Tensor):
-        self.root_positions[:, self.env_actor_index["drone"], :3] = pos
+        self.root_positions[:, self.env_actor_index["drone"]] = pos
+
+    @property
+    def target_pos(self) -> Tensor:
+        return self.root_positions[:, self.env_actor_index["target"]]
+
+    @target_pos.setter
+    def target_pos(self, pos: Tensor):
+        self.root_positions[:, self.env_actor_index["target"]] = pos
+    
+    @property
+    def target_vel(self) -> Tensor:
+        return self.root_linvels[:, self.env_actor_index["target"]]
+
+    @target_vel.setter
+    def target_vel(self, vel: Tensor):
+        self.root_linvels[:, self.env_actor_index["target"]] = vel
 
     def __repr__(self) -> str:
         obs_space = f"obs_space: {self.observation_space}"

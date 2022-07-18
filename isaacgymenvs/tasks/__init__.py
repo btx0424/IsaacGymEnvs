@@ -43,7 +43,7 @@ from .humanoid import Humanoid
 from .humanoid_amp import HumanoidAMP
 from .ingenuity import Ingenuity
 from .quadcopter import Quadcopter
-from .quadrotor import QuadrotorBase, FixedPrey
+from .quadrotor import QuadrotorBase
 from .shadow_hand import ShadowHand
 from .allegro_hand import AllegroHand
 from .trifinger import Trifinger
