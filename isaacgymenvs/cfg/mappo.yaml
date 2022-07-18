@@ -139,7 +139,7 @@ wandb_project: 'isaacgymenvs'
 capture_video: True
 capture_video_freq: 10
 capture_video_len: ${task.env.maxEpisodeLength}
-force_render: False
+force_render: True
 
 # disables rendering
 headless: False
