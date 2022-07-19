@@ -22,6 +22,8 @@ def create_buffer(space: spaces.Space, base_shape: Tuple[int,...], device="cuda"
         return torch.zeros(base_shape+(space.n, ), device=device)
     elif isinstance(space, spaces.MultiDiscrete):
         return torch.zeros(base_shape+tuple(space.nvec), device=device)
+    elif isinstance(space, list):
+        return torch.zeros(base_shape+(space[0],), device=device)
     else:
         raise TypeError(f"Unsupported space type: {type(space)}")
 

@@ -91,18 +91,27 @@ class QuadrotorBase(MultiAgentVecTask):
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
         # MLP obs without obstacles
-        # num_obs = 13 * self.num_agents + self.num_agents + 3
-        num_obs = 13 + 13
+        num_obs = 13*self.num_agents + 13 + 13
         ones = np.ones(num_obs)
         self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
         def obs_processor(obs_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
+            obs_tensor = []
+            identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
             states_self = self.root_states[:, self.env_actor_index["drone"]]
+
             states_target = self.root_states[:, self.env_actor_index["target"]]
-            # states = obs.view(self.num_envs, 1, -1).expand(-1, self.num_agents, -1)
-            # identity = torch.eye(self.num_agents, device=obs.device).expand(self.num_envs, -1, -1)
             states_target[..., :3] = states_target[..., :3] - states_self[..., :3]
-            obs_dict["obs"] = torch.cat([states_target, states_self], dim=-1)
+
+            states_all = states_self.unsqueeze(1).repeat(1, self.num_agents, 1, 1)
+            states_all[..., :3] = states_all[..., :3] - states_self[..., :3].unsqueeze(2) # (env, agent, agent, 3) - (env, agent, 1, 3)
+            states_all = states_all.reshape(self.num_envs, self.num_agents, -1)
+
+            obs_tensor.append(states_target)
+            obs_tensor.append(states_all)
+            obs_tensor.append(states_self)
+            obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
             return obs_dict
+        self.obs_split = [(1, 13), (self.num_agents, 13), (1, 13)]
         self.obs_processor = obs_processor
         self.state_space = self.obs_space
 
@@ -289,7 +298,7 @@ class QuadrotorBase(MultiAgentVecTask):
         self.progress_buf += 1
 
         self.refresh_tensors()
-        self.compute_observations()
+        # self.compute_observations()
         self.compute_reward_and_reset()
         
         if self.viewer:

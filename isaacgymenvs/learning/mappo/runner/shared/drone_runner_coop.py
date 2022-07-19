@@ -46,8 +46,8 @@ class DroneRunner(Runner):
         if all_args.use_attn:
             envs: QuadrotorBase = config["envs"]
             obs_split = envs.obs_split
-            envs.share_observation_space = envs.obs_space = \
-                [[sum(num*dim for num, dim in obs_split), *obs_split]]
+            envs.state_space = envs.obs_space = \
+                [sum(num*dim for num, dim in obs_split), *obs_split]
 
         super().__init__(config)
 
