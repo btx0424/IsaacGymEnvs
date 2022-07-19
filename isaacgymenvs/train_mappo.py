@@ -1,6 +1,7 @@
 import gym
 import hydra
 import isaacgym
+from isaacgymenvs.utils.wrappers import MultiAgentRecordVideo
 import torch
 import wandb
 import datetime
@@ -28,42 +29,18 @@ def main(cfg):
     OmegaConf.set_struct(cfg, False)
     time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     run_name = f"{cfg.wandb_name}/mappo_{time_str}"
-
+    setproctitle.setproctitle(run_name)
+    
     envs: MultiAgentVecTask = create_envs(cfg)
     if cfg.capture_video:
         envs.is_vector_env = True
-        class MultiAgentRecordVideo(gym.wrappers.RecordVideo):
-
-            def step(self, action):
-                observations, rewards, dones, infos = super().step(action)
-                
-                # increment steps and episodes
-                self.step_id += 1
-
-                env_done = dones.reshape(self.num_envs, self.num_agents)[0].all()
-                if env_done:
-                    self.episode_id += 1
-
-                if self.recording:
-                    self.video_recorder.capture_frame()
-                    self.recorded_frames += 1
-                    if self.video_length > 0:
-                        if self.recorded_frames > self.video_length:
-                            self.close_video_recorder()
-                    elif env_done:
-                        self.close_video_recorder()
-
-                elif self._video_enabled():
-                    self.start_video_recorder()
-
-                return observations, rewards, dones, infos
-
         envs = MultiAgentRecordVideo(
             envs,
             f"videos/{run_name}",
             episode_trigger=lambda ep_id: ep_id % cfg.capture_video_freq == 0,
             video_length=cfg.capture_video_len,
         )
+    print(OmegaConf.to_yaml(cfg))
     print(envs)
 
     config = {
@@ -77,8 +54,8 @@ def main(cfg):
         project=cfg.wandb_project,
         group=cfg.wandb_group,
         entity=cfg.wandb_entity,
-        config=cfg,
-        sync_tensorboard=True,
+        config=OmegaConf.to_container(cfg, resolve=True),
+        monitor_gym=True,
         name=run_name,
         resume="allow",
     )

@@ -429,7 +429,7 @@ class VecTask(Env):
 
                 # Wait for dt to elapse in real time.
                 # This synchronizes the physics simulation with the rendering rate.
-                self.gym.sync_frame_time(self.sim)
+                # self.gym.sync_frame_time(self.sim)
 
             else:
                 self.gym.poll_viewer_events(self.viewer)

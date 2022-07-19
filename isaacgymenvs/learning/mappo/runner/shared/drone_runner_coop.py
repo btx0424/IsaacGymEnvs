@@ -1,4 +1,3 @@
-from cmath import inf
 from collections import defaultdict
 from dataclasses import dataclass
 import time
@@ -9,7 +8,6 @@ import numpy as np
 import torch
 import wandb
 from .base_runner import Runner
-from tqdm import tqdm
 
 from isaacgymenvs.learning.mappo.algorithms.rmappo import MAPPOPolicy
 from isaacgymenvs.learning.mappo.utils.shared_buffer import SharedReplayBuffer
@@ -107,7 +105,8 @@ class DroneRunner(Runner):
                 obs = obs.reshape(
                     self.num_envs, self.num_agents, *obs.shape[1:])
                 rewards = rewards.reshape(self.num_envs, self.num_agents, -1)
-                weights = torch.tensor([1., -1., 0., 0.], device=rewards.device)
+                weights = torch.tensor(
+                    [1., -1., 0., 1.], device=rewards.device)
                 rewards = torch.sum(
                     rewards * weights, axis=-1, keepdim=True)
                 dones = dones.reshape(self.num_envs, self.num_agents)
@@ -142,14 +141,17 @@ class DroneRunner(Runner):
                     f"runtime: {env_step_time:.2f} (env), {inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total), fps: {total_env_steps/(end-start):.2f}")
 
                 for k, v in episode_infos.items():
-                    if v:
-                        v = torch.cat(v).cpu().numpy().mean(
-                            0)  # average over episodes
-                        train_infos[k] = v
-                    print(f"episode {k}: {v}")
+                    v = torch.cat(v).cpu().numpy().mean(0)
+                    train_infos[f"Episode/{k}"] = wandb.Histogram(v)
+                    train_infos[f"Episode/{k}/mean"] = v.mean()
+                    print(f"Episode/{k}: {v}")
+
                 episode_infos.clear()
 
-                self.log(train_infos, step=total_env_steps, tag="train")
+                train_infos["env_step"] = total_env_steps
+                train_infos["episode"] = total_episodes
+                train_infos["iteration"] = iteration
+                self.log(train_infos)
 
             if total_env_steps > self.max_env_steps:
                 break
@@ -196,5 +198,5 @@ class DroneRunner(Runner):
         self.buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions,
                            action_log_probs, values, rewards, masks, active_masks=active_masks)
 
-    def log(self, info: Dict[str, Any], step: int, tag: str = ""):
-        wandb.log({f"{tag}/{k}": v for k, v in info.items()}, step=step)
+    def log(self, info: Dict[str, Any]):
+        wandb.log({f"{k}": v for k, v in info.items()})
