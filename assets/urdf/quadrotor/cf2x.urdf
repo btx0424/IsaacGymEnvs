@@ -34,7 +34,6 @@
         <cylinder radius=".06" length=".025"/>
       </geometry>
     </collision>  
-
   </link>
 
   <link name="prop0_link">
