@@ -43,7 +43,7 @@ from .humanoid import Humanoid
 from .humanoid_amp import HumanoidAMP
 from .ingenuity import Ingenuity
 from .quadcopter import Quadcopter
-from .quadrotor import QuadrotorBase
+from .quadrotor import *
 from .shadow_hand import ShadowHand
 from .allegro_hand import AllegroHand
 from .trifinger import Trifinger
@@ -67,7 +67,9 @@ isaacgym_task_map = {
     "HumanoidAMP": HumanoidAMP,
     "Ingenuity": Ingenuity,
     "Quadcopter": Quadcopter,
-    "Quadrotor": QuadrotorBase,
+    "QuadrotorOccupationI": OccupationIndependent,
+    "QuadrotorOccupationC": OccupationCollective,
+    "QuadrotorPredatorPrey": PredatorPrey,
     "ShadowHand": ShadowHand,
     "Trifinger": Trifinger,
 }

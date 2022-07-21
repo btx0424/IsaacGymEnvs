@@ -105,8 +105,10 @@ class DroneRunner(Runner):
                 obs = obs.reshape(
                     self.num_envs, self.num_agents, *obs.shape[1:])
                 rewards = rewards.reshape(self.num_envs, self.num_agents, -1)
+                # weights = torch.tensor(
+                #     [1., -1., 0., 1.], device=rewards.device)
                 weights = torch.tensor(
-                    [1., -1., 0., 1.], device=rewards.device)
+                    [1., -1., 1.], device=rewards.device)
                 rewards = torch.sum(
                     rewards * weights, axis=-1, keepdim=True)
                 dones = dones.reshape(self.num_envs, self.num_agents)

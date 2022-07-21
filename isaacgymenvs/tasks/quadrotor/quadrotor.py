@@ -34,7 +34,7 @@ class TensorTuple(Tuple[torch.Tensor, ...]):
         return TensorTuple(v.flatten(start_dim, end_dim) for v in self)
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
-    return x / x.norm(dim=-1, keepdim=True)
+    return x / (1e-7 + x.norm(dim=-1, keepdim=True))
 
 class QuadrotorBase(MultiAgentVecTask):
     
@@ -154,9 +154,9 @@ class QuadrotorBase(MultiAgentVecTask):
 
             for i_agent in range(self.num_agents):
                 drone_handle = self.gym.create_actor(env, asset, drone_pose, f"cf2x_{i_agent}", i_env, 0)
-                drone_pose.p.x += 0.15
-                drone_pose.p.y += 0.15
-                drone_pose.p.z += 0.1
+                drone_pose.p.x += 0.2
+                drone_pose.p.y += 0.2
+                drone_pose.p.z += 0.15
                 sphere_handle = self.gym.create_actor(env, sphere_asset, sphere_pose, f"sphere_{i_agent}", i_env, 1)
                 if i_env == 0:
                     # actor index
@@ -252,7 +252,9 @@ class QuadrotorBase(MultiAgentVecTask):
         
         if self.viewer:
             self.gym.clear_lines(self.viewer)
-            points = torch.cat([self.quadrotor_pos[0], self.target_pos[0]], dim=-1).cpu().numpy()
+            quadrotor_pos = self.quadrotor_pos[0]
+            target_pos = self.target_pos[0].expand_as(quadrotor_pos)
+            points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
             self.gym.add_lines(self.viewer, self.envs[0], self.num_agents, points, [0, 1, 0])
     
     # def compute_observations(self):
@@ -622,6 +624,8 @@ class PredatorPrey(QuadrotorBase):
         super().allocate_buffers()
 
         self.captured_steps_buf = torch.zeros(self.num_envs, device=self.device)
+        self.target_distance_buf = torch.zeros(
+            (self.num_envs, self.num_agents), device=self.device)
 
     def create_obs_space_and_processor(self, obs_type=None) -> None:
         num_obs = 13*self.num_agents + 13 + 13
@@ -632,7 +636,7 @@ class PredatorPrey(QuadrotorBase):
             identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
             states_self = self.root_states[:, self.env_actor_index["drone"]]
 
-            states_target = self.root_states[:, self.env_actor_index["target"][0]]
+            states_target = self.root_states[:, self.env_actor_index["target"][0]].unsqueeze(1).repeat(1, self.num_agents, 1)
             states_target[..., :3] = states_target[..., :3] - states_self[..., :3]
             assert states_target.shape == states_self.shape
 
@@ -655,19 +659,20 @@ class PredatorPrey(QuadrotorBase):
         contact = self.contact_forces[:, self.env_body_index["base"]]
 
         target_distance = torch.norm(self.target_pos-pos, dim=-1) # (num_envs, num_agents)
-        distance_reward = torch.mean(1.0 / (1.0 + target_distance.min(-1) ** 2))
+        target_distance_min = target_distance.min(-1)
+        distance_reward = torch.mean(1.0 / (1.0 + target_distance_min.values ** 2))
         # spinnage = torch.abs(angvel[..., 2])
         # spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
         # distance_reward = distance_reward + distance_reward * spinnage_reward
         collision_penalty = contact.any(-1).float()
 
-        captured: Tensor = (target_distance.min(-1) < self.capture_radius).any(-1)
+        captured: Tensor = (target_distance_min.values < self.capture_radius).any(-1)
         self.captured_steps_buf[~captured] = 0
         self.captured_steps_buf[captured] += 1
 
         self.rew_buf[..., 0] = distance_reward
         self.rew_buf[..., 1] = collision_penalty
-        self.rew_buf[..., 3] = captured.float()
+        self.rew_buf[..., 2] = captured.float()
         
         self.cum_rew_buf.add_(self.rew_buf)
         
@@ -686,4 +691,29 @@ class PredatorPrey(QuadrotorBase):
     
     @property
     def target_pos(self) -> Tensor:
-        return self.root_positions[:, self.env_actor_index["target"][0]]
+        return self.root_positions[:, self.env_actor_index["target"][0]].unsqueeze(1)
+
+    @property
+    def target_vel(self) -> Tensor:
+        return self.root_linvels[:, self.env_actor_index["target"][0]]
+
+    @target_vel.setter
+    def target_vel(self, vel: Tensor):
+        self.root_linvels[:, self.env_actor_index["target"][0]] = vel
+
+    def update_targets(self):
+        target_pos = self.target_pos
+        boundary_pos = target_pos.clone()
+        boundary_pos[..., :2] = normalize(boundary_pos[..., :2]) * 2
+        force_sources = torch.cat([self.quadrotor_pos, boundary_pos], dim=1)
+        distance = torch.norm(target_pos - force_sources, dim=-1, keepdim=True)
+        forces = (target_pos - force_sources) / (1e-7 + distance**2)
+        target_vel = normalize(torch.mean(forces, dim=-2)) * 0.5
+        target_vel[..., 2] *= 0.5
+        self.target_vel = target_vel
+
+        # apply
+        actor_reset_ids = self.sim_actor_index["target"].flatten()
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
+    
