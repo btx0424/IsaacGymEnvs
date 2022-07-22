@@ -149,6 +149,11 @@ class PredatorPrey(QuadrotorBase):
         self.target_distance_buf = torch.zeros(
             (self.num_envs, self.num_agents), device=self.device)
 
+    def reset_buffers(self, env_ids):
+        super().reset_buffers(env_ids)
+        self.target_distance_buf[env_ids] = 0
+        self.captured_steps_buf[env_ids] = 0
+        
     def create_obs_space_and_processor(self, obs_type=None) -> None:
         num_obs = 13*self.num_agents + 13 + 13
         ones = np.ones(num_obs)

@@ -43,10 +43,10 @@ class QuadrotorBase(MultiAgentVecTask):
 
         self.actor_types = ["drone", "box", "sphere"]
         self.box_states = torch.tensor([
-            [-1, 0, 0.5, 0.05, 1., 1.],
-            [0, -1, 0.5, 1., 0.05, 1.],
-            [1, 0, 0.5, 0.05, 1., 1.],
-            [0, 1, 0.5, 1., 0.05, 1.]], device=rl_device) * 2
+            [-1, 0, 0.3, 0.05, 2., .6],
+            [0, -1, 0.3, 2., 0.05, .6],
+            [1, 0, 0.3, 0.05, 2., .6],
+            [0, 1, 0.3, 2., 0.05, .6]], device=rl_device) * 3
         # self.num_drones = cfg["env"]["numDrones"]
         self.num_boxes = len(self.box_states)
 
@@ -77,8 +77,8 @@ class QuadrotorBase(MultiAgentVecTask):
         self.max_episode_length = self.cfg["env"]["maxEpisodeLength"]
 
         if self.viewer:
-            cam_pos = gymapi.Vec3(-1.5, -1.0, 1.8)
-            cam_target = gymapi.Vec3(0, 0, 0.2)
+            cam_pos = gymapi.Vec3(-2.2, 0, 2.75)
+            cam_target = gymapi.Vec3(0, 0, 0.1)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
         self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
@@ -246,7 +246,8 @@ class QuadrotorBase(MultiAgentVecTask):
             self.gym.clear_lines(self.viewer)
             for points, color in self.viewer_lines:
                 self.gym.add_lines(self.viewer, self.envs[0], len(points), points, color)
-    
+            self.viewer_lines.clear()
+            
     # def compute_observations(self):
     #     self.obs_buf[..., :3] = self.quadrotor_pos / 3
     #     self.obs_buf[..., 3:7] = self.root_quats[:, self.env_actor_index["drone"]]
