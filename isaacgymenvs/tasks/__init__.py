@@ -68,7 +68,6 @@ isaacgym_task_map = {
     "Ingenuity": Ingenuity,
     "Quadcopter": Quadcopter,
     "QuadrotorOccupationI": OccupationIndependent,
-    "QuadrotorOccupationC": OccupationCollective,
     "QuadrotorPredatorPrey": PredatorPrey,
     "ShadowHand": ShadowHand,
     "Trifinger": Trifinger,

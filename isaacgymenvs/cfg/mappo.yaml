@@ -16,7 +16,7 @@ torch_deterministic: False
 
 # set the maximum number of learning iterations to train for. overrides default per-environment setting
 max_iterations: 500
-max_env_steps: 100_000_000
+max_env_steps: 50_000_000
 
 ## Device config
 #  'physx' or 'flex'
@@ -32,8 +32,8 @@ graphics_device_id: ${cuda_id}
 
 params:
   # ppo
-  num_steps: 16
-  num_mini_batch: 16 
+  num_steps: 32
+  num_mini_batch: 8 
   ppo_epoch: 5
   clip_param: 0.2
   entropy_coef: 0.01
@@ -57,12 +57,10 @@ params:
   cnn_layers_params: null
   cuda: true
   cuda_deterministic: true
-  data_chunk_length: 10
+  data_chunk_length: 16
   dropout: 0.0
-  env_name: StarCraft2
   eval_episodes: 32
   eval_interval: 25
-  experiment_name: check
   explored_ratio_threshold: 0.9
   gae_lambda: 0.95
   gain: 0.01
@@ -74,11 +72,6 @@ params:
   max_grad_norm: 10.0
   metric_T: 5
   model_dir: null
-  n_eval_rollout_threads: 1
-  n_render_rollout_threads: 1
-  n_rollout_threads: ${task.env.numEnvs}
-  n_training_threads: 1
-  num_env_steps: 500000000.0
   opti_eps: 1.0e-05
   policy_value_loss_coef: 1
   render_episodes: 5
@@ -132,12 +125,12 @@ params:
   weight_decay: 0
 
 wandb_activate: True
-wandb_group: ''
+wandb_group: ${task.name}
 wandb_name: ${task.name}
 wandb_entity: ''
 wandb_project: 'isaacgymenvs'
 capture_video: True
-capture_video_freq: 10
+capture_video_freq: 4
 capture_video_len: ${task.env.maxEpisodeLength}
 force_render: True
 

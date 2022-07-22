@@ -22,15 +22,10 @@ class Runner(object):
 
         self.all_args = config['all_args']
         self.envs: MultiAgentVecTask = config['envs']
-        # self.eval_envs = config['eval_envs']
-        self.device = config['device']     
 
         # parameters
         self.use_centralized_V = self.all_args.use_centralized_V
 
-        self.n_rollout_threads = self.all_args.n_rollout_threads
-        self.n_eval_rollout_threads = self.all_args.n_eval_rollout_threads
-        self.n_render_rollout_threads = self.all_args.n_render_rollout_threads
         self.use_linear_lr_decay = self.all_args.use_linear_lr_decay
         self.hidden_size = self.all_args.hidden_size
 
@@ -59,7 +54,7 @@ class Runner(object):
             self.buffer.share_obs[-1].flatten(end_dim=1),
             self.buffer.rnn_states_critic[-1].flatten(end_dim=1),
             self.buffer.masks[-1].flatten(end_dim=1))
-        next_values = next_values.reshape(self.n_rollout_threads, self.num_agents, 1)
+        next_values = next_values.reshape(self.num_envs, self.num_agents, 1)
         self.buffer.compute_returns(next_values, self.policy.value_normalizer)
     
     def train(self):

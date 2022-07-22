@@ -1,7 +1,3 @@
-from abc import abstractmethod, ABC
-from dataclasses import dataclass
-import time
-from pyrsistent import s
 import torch
 import os
 import math
@@ -13,6 +9,8 @@ from xml.etree import ElementTree
 from typing import Callable, Dict, Tuple, Any
 from torch import Tensor
 from collections import defaultdict
+
+from tqdm import tqdm
 from .controller import DSLPIDControl
 from ..base.vec_task import MultiAgentVecTask
 
@@ -33,9 +31,6 @@ class TensorTuple(Tuple[torch.Tensor, ...]):
     def flatten(self, start_dim: int = 0, end_dim: int = -1):
         return TensorTuple(v.flatten(start_dim, end_dim) for v in self)
 
-def normalize(x: torch.Tensor) -> torch.Tensor:
-    return x / (1e-7 + x.norm(dim=-1, keepdim=True))
-
 class QuadrotorBase(MultiAgentVecTask):
     
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
@@ -48,10 +43,10 @@ class QuadrotorBase(MultiAgentVecTask):
 
         self.actor_types = ["drone", "box", "sphere"]
         self.box_states = torch.tensor([
-            [-1, 1, 0.5, 0.1, 0.1, 1.],
-            [1, 1, 0.5, 0.1, 0.1, 1.],
-            [1, -1, 0.5, 0.1, 0.1, 1.],
-            [-1, -1, 0.5, .1, 0.1, 1.]], device=rl_device)
+            [-1, 0, 0.5, 0.05, 1., 1.],
+            [0, -1, 0.5, 1., 0.05, 1.],
+            [1, 0, 0.5, 0.05, 1., 1.],
+            [0, 1, 0.5, 1., 0.05, 1.]], device=rl_device) * 2
         # self.num_drones = cfg["env"]["numDrones"]
         self.num_boxes = len(self.box_states)
 
@@ -87,9 +82,11 @@ class QuadrotorBase(MultiAgentVecTask):
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
         self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
+        
         self.act_type = cfg["env"].get("actType", "pid_vel")
+        self.obs_type = cfg["env"].get("obsType", "root_state")
         self.create_act_space_and_processor(self.act_type)
-        self.create_obs_space_and_processor()
+        self.create_obs_space_and_processor(self.obs_type)
 
     def create_sim(self):
         self.sim_params.up_axis = gymapi.UP_AXIS_Z
@@ -148,7 +145,7 @@ class QuadrotorBase(MultiAgentVecTask):
         centers = torch.tensor(list(np.ndindex(*(grid_shape.cpu()))), device=self.rl_device) + 0.5
         avail = torch.ones(len(centers), dtype=bool)
 
-        for i_env in range(self.num_envs):
+        for i_env in tqdm(range(self.num_envs), desc="Creating envs"):
             env = self.gym.create_env(self.sim, lower, upper, num_per_row)
             drone_pose.p = gymapi.Vec3(0.0, 0.0, 0.25)
 
@@ -202,25 +199,21 @@ class QuadrotorBase(MultiAgentVecTask):
         self.grid_avail = torch.nonzero(avail).flatten()
         
     def reset_idx(self, env_ids):
-        self.root_states[env_ids] = self.initial_root_states[env_ids]
-        # sample_idx = np.random.choice(self.grid_avail, self.num_agents, replace=False)
-        # self.quadrotor_pos = self.grid_centers[sample_idx]
-        
-        # reset buffers first
-        self.reset_buf[env_ids] = 0
-        self.progress_buf[env_ids] = 0
-        self.cum_rew_buf[env_ids] = 0
-        self.target_distance_buf[env_ids] = 0
-        self.captured_steps_buf[env_ids] = 0
+        self.controller.reset_idx(env_ids, self.num_envs)
 
-        # self.reset_quadrotors(env_ids)
-        self.reset_targets(env_ids)
-        # self.reset_obstacles(env_ids)
+        self.reset_buffers(env_ids)
+        self.reset_actors(env_ids)
         root_reset_ids = self.sim_actor_index["__all__"][env_ids].flatten()
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
+    
+    def reset_buffers(self, env_ids):
+        self.reset_buf[env_ids] = 0
+        self.progress_buf[env_ids] = 0
+        self.cum_rew_buf[env_ids] = 0
 
-        self.controller.reset_idx(env_ids, self.num_envs)
+    def reset_actors(self, env_ids):
+        self.root_states[env_ids] = self.initial_root_states[env_ids]
 
     def pre_physics_step(self, actions: torch.Tensor):
         actions = actions.view(self.num_envs, self.num_agents, 4)
@@ -241,7 +234,6 @@ class QuadrotorBase(MultiAgentVecTask):
         self.gym.apply_rigid_body_force_tensors(self.sim, 
             gymtorch.unwrap_tensor(self.forces), 
             gymtorch.unwrap_tensor(self.z_torques), gymapi.LOCAL_SPACE)
-        self.update_targets()
 
     def post_physics_step(self):
         self.progress_buf += 1
@@ -250,12 +242,10 @@ class QuadrotorBase(MultiAgentVecTask):
         # self.compute_observations()
         self.compute_reward_and_reset()
         
-        if self.viewer:
+        if self.viewer and self.viewer_lines:
             self.gym.clear_lines(self.viewer)
-            quadrotor_pos = self.quadrotor_pos[0]
-            target_pos = self.target_pos[0].expand_as(quadrotor_pos)
-            points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
-            self.gym.add_lines(self.viewer, self.envs[0], self.num_agents, points, [0, 1, 0])
+            for points, color in self.viewer_lines:
+                self.gym.add_lines(self.viewer, self.envs[0], len(points), points, color)
     
     # def compute_observations(self):
     #     self.obs_buf[..., :3] = self.quadrotor_pos / 3
@@ -280,51 +270,16 @@ class QuadrotorBase(MultiAgentVecTask):
         return obs_dict.flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info # TODO: check mappo and remove .clone()
 
     def reset(self) -> Dict[str, torch.Tensor]:
-        self.controller.reset()
         self.reset_idx(torch.arange(self.num_envs))
         obs_dict = TensorDict(super().reset())
         self.obs_processor(obs_dict)
         self.extras["episode"] = {}
+        self.viewer_lines = []
         return obs_dict.flatten(end_dim=1)
 
     def refresh_tensors(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
-
-    def reset_targets(self, env_ids):
-        spacing = torch.linspace(0, self.max_episode_length, self.num_agents+1, device=self.device)[:-1]
-        rad = (self.progress_buf[env_ids].unsqueeze(-1)+spacing)/self.max_episode_length*math.pi*2
-        env_positions = self.root_positions[env_ids]
-        env_velocities = self.root_linvels[env_ids]
-        env_positions[:, self.env_actor_index["target"], 0] = torch.sin(rad)
-        env_positions[:, self.env_actor_index["target"], 1] = torch.cos(rad)
-        env_positions[:, self.env_actor_index["target"], 2] = 0.5
-        env_velocities[:, self.env_actor_index["target"]] = 0
-        self.root_positions[env_ids] = env_positions
-        self.root_linvels[env_ids] = env_velocities
-
-    def reset_quadrotors(self, env_ids):
-        env_positions = self.root_positions[env_ids]
-        env_velocities = self.root_linvels[env_ids]
-        default_pos = (torch.arange(self.num_agents).unsqueeze(-1) * torch.ones(3)).to(self.device)
-        env_positions[:, self.env_actor_index["drone"]] = default_pos
-        env_velocities[:, self.env_actor_index["drone"]] = 0
-        self.root_positions[env_ids] = env_positions
-        self.root_linvels[env_ids] = env_velocities
-
-    def update_targets(self):
-        # self.target_vel = normalize(self.target_pos - self.quadrotor_pos) * 0.1
-
-        xy = self.target_pos[..., :2] # (env, target, [x, y])
-        angvel = math.pi * 2 / self.max_episode_length
-        rad = torch.atan2(xy[..., 1], xy[..., 0]) + angvel
-        next_xy = torch.stack([torch.cos(rad), torch.sin(rad)], dim=-1)
-        self.root_linvels[:, self.env_actor_index["target"], :2] = (next_xy - xy) / (self.dt * self.control_freq_inv)
-
-        # apply
-        actor_reset_ids = self.sim_actor_index["target"].flatten()
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
 
     @property
     def quadrotor_states(self) -> TensorTuple:
@@ -374,13 +329,7 @@ class QuadrotorBase(MultiAgentVecTask):
                 target_pos = pos + actions.reshape(-1, 3)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], target_pos[:self.num_agents]], dim=1).cpu().numpy()
-                    self.gym.add_lines(
-                        self.viewer, 
-                        self.envs[0], 
-                        self.num_agents, 
-                        points,
-                        [1, 0, 0])
-
+                    self.viewer_lines.append(points, [1., 0., 0.])
                 rpms = self.controller.compute_control(
                     self.TIME_STEP,
                     pos, quat, vel, angvel,
@@ -399,12 +348,7 @@ class QuadrotorBase(MultiAgentVecTask):
                 target_vel = actions.reshape(-1, 3)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], pos[:self.num_agents] + target_vel[:self.num_agents]], dim=1).cpu().numpy()
-                    self.gym.add_lines(
-                        self.viewer, 
-                        self.envs[0], 
-                        self.num_agents, 
-                        points,
-                        [1, 0, 0])
+                    self.viewer_lines.append((points, [1., 0., 0.]))
                 rpms = self.controller.compute_control(
                     self.TIME_STEP,
                     pos, quat, vel, angvel,
@@ -422,12 +366,7 @@ class QuadrotorBase(MultiAgentVecTask):
                 target_vel = (actions.reshape(-1, 3) - 1)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], pos[:self.num_agents] + target_vel[:self.num_agents]], dim=1).cpu().numpy()
-                    self.gym.add_lines(
-                        self.viewer, 
-                        self.envs[0], 
-                        self.num_agents, 
-                        points,
-                        [1, 0, 0])
+                    self.viewer_lines.append((points, [1., 0., 0.]))
                 rpms = self.controller.compute_control(
                     self.TIME_STEP,
                     pos, quat, vel, angvel,
@@ -449,271 +388,4 @@ class QuadrotorBase(MultiAgentVecTask):
             self.act_processor = act_processor
         else:
             raise NotImplementedError(act_type)
-
-class OccupationIndependent(QuadrotorBase):
-    
-    def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
-        cfg["env"]["numRewards"] = 4 # [distance, collision, progress, capture]
-        
-        super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
-        # task specification
-        self.capture_radius: float = cfg.get("captureRadius", 0.3)
-        self.success_threshold: int = cfg.get("successThreshold", 50)
-
-    def allocate_buffers(self):
-        super().allocate_buffers()
-
-        self.captured_steps_buf = torch.zeros(
-            (self.num_envs, self.num_agents), device=self.device)
-        self.target_distance_buf = torch.zeros(
-            (self.num_envs, self.num_agents), device=self.device)
-
-    def create_obs_space_and_processor(self, obs_type=None) -> None:
-        num_obs = 13*self.num_agents + 13 + 13
-        ones = np.ones(num_obs)
-        self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
-        def obs_processor(obs_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
-            obs_tensor = []
-            identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
-            states_self = self.root_states[:, self.env_actor_index["drone"]]
-
-            states_target = self.root_states[:, self.env_actor_index["target"]]
-            states_target[..., :3] = states_target[..., :3] - states_self[..., :3]
-
-            states_all = states_self.unsqueeze(1).repeat(1, self.num_agents, 1, 1)
-            states_all[..., :3] = states_all[..., :3] - states_self[..., :3].unsqueeze(2) # (env, agent, agent, 3) - (env, agent, 1, 3)
-            states_all = states_all.reshape(self.num_envs, self.num_agents, -1)
-
-            obs_tensor.append(states_target)
-            obs_tensor.append(states_all)
-            obs_tensor.append(states_self)
-            obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
-            return obs_dict
-        self.obs_split = [(1, 13), (self.num_agents, 13), (1, 13)]
-        self.obs_processor = obs_processor
-        self.state_space = self.obs_space
-
-    def compute_reward_and_reset(self):
-        pos, quat, vel, angvel = self.quadrotor_states
-            
-        contact = self.contact_forces[:, self.env_body_index["base"]]
-
-        target_distance = torch.norm(self.target_pos-pos, dim=-1)
-        distance_reward = 1.0 / (1.0 + target_distance ** 2)
-        spinnage = torch.abs(angvel[..., 2])
-        spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
-        distance_reward = distance_reward + distance_reward * spinnage_reward
-        collision_penalty = contact.any(-1).float()
-        progress_reward = self.target_distance_buf - target_distance
-
-        captured: Tensor = target_distance < self.capture_radius
-        self.captured_steps_buf[~captured] = 0
-        self.captured_steps_buf[captured] += 1
-
-        self.rew_buf[..., 0] = distance_reward
-        self.rew_buf[..., 1] = collision_penalty
-        self.rew_buf[..., 2] = progress_reward
-        self.rew_buf[..., 3] = captured.float()
-        
-        self.cum_rew_buf.add_(self.rew_buf)
-        self.target_distance_buf[:] = target_distance
-        
-        self.reset_buf.zero_()
-        self.reset_buf[target_distance > 3] = 1
-        self.reset_buf[pos[..., 2] < 0.1] = 1
-        self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
-
-        self.extras["episode"].update({
-            "reward/distance": self.cum_rew_buf[..., 0],
-            "reward/collision": self.cum_rew_buf[..., 1],
-            "reward/progress": self.cum_rew_buf[..., 2],
-            "reward/capture": self.cum_rew_buf[..., 3],
-            
-            "success": (self.captured_steps_buf > self.success_threshold).float(),
-        })
-
-class OccupationCollective(QuadrotorBase):
-    """
-    Success when all targets are captured.
-    """
-    def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
-        cfg["env"]["numRewards"] = 3 # [distance, collision, capture]
-        
-        super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
-        # task specification
-        self.capture_radius: float = cfg.get("captureRadius", 0.3)
-        self.success_threshold: int = cfg.get("successThreshold", 50)
-
-    def allocate_buffers(self):
-        super().allocate_buffers()
-
-        self.captured_steps_buf = torch.zeros(self.num_envs, device=self.device)
-
-    def create_obs_space_and_processor(self, obs_type=None) -> None:
-        num_obs = 13*self.num_agents + 13 + 13 * self.num_agents
-        ones = np.ones(num_obs)
-        self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
-        def obs_processor(obs_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
-            obs_tensor = []
-            identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
-            states_self = self.root_states[:, self.env_actor_index["drone"]]
-
-            states_target = self.root_states[:, self.env_actor_index["target"]]
-            states_target = states_self.unsqueeze(1).repeat(1, self.num_agents, 1, 1)
-            states_target[..., :3] = states_target[..., :3] - states_self[..., :3].unsqueeze(2)
-            states_target = states_target.reshape(self.num_envs, self.num_agents, -1)
-
-            states_all = states_self.unsqueeze(1).repeat(1, self.num_agents, 1, 1)
-            states_all[..., :3] = states_all[..., :3] - states_self[..., :3].unsqueeze(2)
-            states_all = states_all.reshape(self.num_envs, self.num_agents, -1)
-
-            obs_tensor.append(states_target) # (env, num_agents, num_agents*13)
-            obs_tensor.append(states_all) # (env, num_agents, num_agents*13)
-            obs_tensor.append(states_self) # (env, num_agents, 13)
-            obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
-            return obs_dict
-        self.obs_split = [(self.num_agents, 13), (self.num_agents, 13), (1, 13)]
-        self.obs_processor = obs_processor
-        self.state_space = self.obs_space
-        
-    def compute_reward_and_reset(self):
-        pos, quat, vel, angvel = self.quadrotor_states
-            
-        contact = self.contact_forces[:, self.env_body_index["base"]]
-
-        target_distance = torch.norm(self.target_pos.unsqueeze(-2)-pos, dim=-1) # (num_envs, num_targets, num_agents)
-        distance_reward = torch.mean(1.0 / (1.0 + target_distance.min(-1) ** 2))
-        # spinnage = torch.abs(angvel[..., 2])
-        # spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
-        # distance_reward = distance_reward + distance_reward * spinnage_reward
-        collision_penalty = contact.any(-1).float()
-
-        captured: Tensor = (target_distance.min(-1) < self.capture_radius).all(-1)
-        self.captured_steps_buf[~captured] = 0
-        self.captured_steps_buf[captured] += 1
-
-        self.rew_buf[..., 0] = distance_reward
-        self.rew_buf[..., 1] = collision_penalty
-        self.rew_buf[..., 2] = captured.float()
-        
-        self.cum_rew_buf.add_(self.rew_buf)
-        
-        self.reset_buf.zero_()
-        self.reset_buf[(target_distance > 3).all(-2)] = 1
-        self.reset_buf[pos[..., 2] < 0.1] = 1
-        self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
-
-        self.extras["episode"].update({
-            "reward/distance": self.cum_rew_buf[..., 0],
-            "reward/collision": self.cum_rew_buf[..., 1],
-            "reward/capture": self.cum_rew_buf[..., 2],
-            
-            "success": (self.captured_steps_buf > self.success_threshold).float(),
-        })
-
-class PredatorPrey(QuadrotorBase):
-    def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
-        cfg["env"]["numRewards"] = 3 # [distance, collision, capture]
-        
-        super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
-        # task specification
-        self.capture_radius: float = cfg.get("captureRadius", 0.3)
-        self.success_threshold: int = cfg.get("successThreshold", 50)
-
-    def allocate_buffers(self):
-        super().allocate_buffers()
-
-        self.captured_steps_buf = torch.zeros(self.num_envs, device=self.device)
-        self.target_distance_buf = torch.zeros(
-            (self.num_envs, self.num_agents), device=self.device)
-
-    def create_obs_space_and_processor(self, obs_type=None) -> None:
-        num_obs = 13*self.num_agents + 13 + 13
-        ones = np.ones(num_obs)
-        self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
-        def obs_processor(obs_dict: Dict[str, Tensor]) -> Dict[str, Tensor]:
-            obs_tensor = []
-            identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
-            states_self = self.root_states[:, self.env_actor_index["drone"]]
-
-            states_target = self.root_states[:, self.env_actor_index["target"][0]].unsqueeze(1).repeat(1, self.num_agents, 1)
-            states_target[..., :3] = states_target[..., :3] - states_self[..., :3]
-            assert states_target.shape == states_self.shape
-
-            states_all = states_self.unsqueeze(1).repeat(1, self.num_agents, 1, 1)
-            states_all[..., :3] = states_all[..., :3] - states_self[..., :3].unsqueeze(2) # (env, agent, agent, 3) - (env, agent, 1, 3)
-            states_all = states_all.reshape(self.num_envs, self.num_agents, -1)
-
-            obs_tensor.append(states_target)
-            obs_tensor.append(states_all)
-            obs_tensor.append(states_self)
-            obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
-            return obs_dict
-        self.obs_split = [(1, 13), (self.num_agents, 13), (1, 13)]
-        self.obs_processor = obs_processor
-        self.state_space = self.obs_space
-    
-    def compute_reward_and_reset(self):
-        pos, quat, vel, angvel = self.quadrotor_states
-            
-        contact = self.contact_forces[:, self.env_body_index["base"]]
-
-        target_distance = torch.norm(self.target_pos-pos, dim=-1) # (num_envs, num_agents)
-        target_distance_min = target_distance.min(-1)
-        distance_reward = torch.mean(1.0 / (1.0 + target_distance_min.values ** 2))
-        # spinnage = torch.abs(angvel[..., 2])
-        # spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
-        # distance_reward = distance_reward + distance_reward * spinnage_reward
-        collision_penalty = contact.any(-1).float()
-
-        captured: Tensor = (target_distance_min.values < self.capture_radius).any(-1)
-        self.captured_steps_buf[~captured] = 0
-        self.captured_steps_buf[captured] += 1
-
-        self.rew_buf[..., 0] = distance_reward
-        self.rew_buf[..., 1] = collision_penalty
-        self.rew_buf[..., 2] = captured.float()
-        
-        self.cum_rew_buf.add_(self.rew_buf)
-        
-        self.reset_buf.zero_()
-        self.reset_buf[(target_distance > 3).all(-1)] = 1
-        self.reset_buf[pos[..., 2] < 0.1] = 1
-        self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
-
-        self.extras["episode"].update({
-            "reward/distance": self.cum_rew_buf[..., 0],
-            "reward/collision": self.cum_rew_buf[..., 1],
-            "reward/capture": self.cum_rew_buf[..., 2],
-            
-            "success": (self.captured_steps_buf > self.success_threshold).float(),
-        })
-    
-    @property
-    def target_pos(self) -> Tensor:
-        return self.root_positions[:, self.env_actor_index["target"][0]].unsqueeze(1)
-
-    @property
-    def target_vel(self) -> Tensor:
-        return self.root_linvels[:, self.env_actor_index["target"][0]]
-
-    @target_vel.setter
-    def target_vel(self, vel: Tensor):
-        self.root_linvels[:, self.env_actor_index["target"][0]] = vel
-
-    def update_targets(self):
-        target_pos = self.target_pos
-        boundary_pos = target_pos.clone()
-        boundary_pos[..., :2] = normalize(boundary_pos[..., :2]) * 2
-        force_sources = torch.cat([self.quadrotor_pos, boundary_pos], dim=1)
-        distance = torch.norm(target_pos - force_sources, dim=-1, keepdim=True)
-        forces = (target_pos - force_sources) / (1e-7 + distance**2)
-        target_vel = normalize(torch.mean(forces, dim=-2)) * 0.5
-        target_vel[..., 2] *= 0.5
-        self.target_vel = target_vel
-
-        # apply
-        actor_reset_ids = self.sim_actor_index["target"].flatten()
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
     

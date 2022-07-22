@@ -21,8 +21,6 @@ class DSLPIDControl:
         self.KF = kf
         self.N = n
 
-    def reset(self):
-        n = self.N
         self.last_pos_e = torch.zeros((n, 3), device=self.device)
         self.integral_pos_e = torch.zeros((n, 3), device=self.device)
         self.last_rpy = torch.zeros((n, 3), device=self.device)
@@ -85,15 +83,6 @@ class DSLPIDControl:
         target_y_ax = torch.cross(target_z_ax, target_x_c) / torch.linalg.norm(torch.cross(target_z_ax, target_x_c), axis=-1, keepdims=True)
         target_x_ax = torch.cross(target_y_ax, target_z_ax)
         target_rotation = torch.stack([target_x_ax, target_y_ax, target_z_ax], dim=-1)
-        # print("target_thrust", target_thrust)
-        # print("scalar_thrust", scalar_thrust)
-        # print("thrust", thrust)
-        # print("target_z_ax", target_z_ax)
-        # print("target_x_c", target_x_c)
-        # print("target_y_ax", target_y_ax)
-        # print("target_x_ax", target_x_ax)
-        # print("target_rotation", target_rotation)
-        # raise
         return thrust, target_rotation, pos_e
     
     def _attitude_control(self,
@@ -117,22 +106,8 @@ class DSLPIDControl:
         target_torques = - self.P_COEFF_TOR * rot_e \
                          + self.D_COEFF_TOR * rpy_rates_e \
                          + self.I_COEFF_TOR * self.integral_rpy_e
-        # print("P * rot_e", self.P_COEFF_TOR * rot_e)
-        # print("D * rpy_rates_e", self.D_COEFF_TOR * rpy_rates_e)
-        # print("I * self.integral_rpy_e", self.I_COEFF_TOR * self.integral_rpy_e)
         
         target_torques = torch.clip(target_torques, -3200, 3200)
         pwm = thrust + (self.MIXER_MATRIX @ target_torques.T).T
-
-        # print("cur_rotation: ", cur_rotation)
-        # print("target_rotation: ", target_rotation)
-        # print("rot_matrix_e: ", rot_matrix_e)
-        # print("rot_e: ", rot_e)
-        # print("rpy_rates_e: ", rpy_rates_e)
-        # print("integral_rpy_e: ", self.integral_rpy_e)
-        # print("target_torques: ", target_torques)
-        # print("pwm: ", pwm)
-        # print("thrust: ", thrust)
-        # raise
         pwm = torch.clip(pwm, self.MIN_PWM, self.MAX_PWM)
         return self.PWM2RPM_SCALE * pwm + self.PWM2RPM_CONST

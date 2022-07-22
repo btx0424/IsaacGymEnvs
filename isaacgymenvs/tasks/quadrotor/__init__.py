@@ -1,6 +1,2 @@
-from .quadrotor import (
-    QuadrotorBase, 
-    OccupationCollective,
-    OccupationIndependent,
-    PredatorPrey,
-)
+from .base import QuadrotorBase
+from .tasks import OccupationIndependent, PredatorPrey

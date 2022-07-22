@@ -24,7 +24,7 @@ class RunnerConfig:
     log_interval: int = 5
     save_interval: int = 10
 
-
+    rl_device: str = "cuda"
 @dataclass
 class PPOConfig:
     num_steps: int = 16
@@ -41,6 +41,7 @@ class DroneRunner(Runner):
         self.num_envs = cfg.num_envs
         self.num_agents = cfg.num_agents
 
+        self.device = cfg.rl_device
         all_args = config["all_args"]
 
         if all_args.use_attn:
@@ -63,6 +64,7 @@ class DroneRunner(Runner):
 
         self.buffer = SharedReplayBuffer(
             self.all_args,
+            self.num_envs,
             self.num_agents,
             envs.obs_space,
             envs.state_space,
@@ -85,6 +87,7 @@ class DroneRunner(Runner):
         total_episodes = 0
 
         episode_infos = defaultdict(lambda: [])
+        episode_train_reward = torch.zeros(self.num_envs, self.num_agents, device=self.device)
 
         for iteration in range(self.max_iterations):
 
@@ -94,8 +97,7 @@ class DroneRunner(Runner):
             for step in range(self.num_steps):
                 # Sample actions
                 _step_start = time.perf_counter()
-                values, actions, action_log_probs, rnn_states, rnn_states_critic = self.collect(
-                    step)
+                values, actions, action_log_probs, rnn_states, rnn_states_critic = self.collect(step)
                 _inf_end = time.perf_counter()
                 obs_dict, rewards, dones, infos = self.envs.step(actions)
                 _env_end = time.perf_counter()
@@ -105,12 +107,8 @@ class DroneRunner(Runner):
                 obs = obs.reshape(
                     self.num_envs, self.num_agents, *obs.shape[1:])
                 rewards = rewards.reshape(self.num_envs, self.num_agents, -1)
-                # weights = torch.tensor(
-                #     [1., -1., 0., 1.], device=rewards.device)
-                weights = torch.tensor(
-                    [1., -1., 1.], device=rewards.device)
-                rewards = torch.sum(
-                    rewards * weights, axis=-1, keepdim=True)
+                weights = torch.ones(rewards.shape[-1], device=rewards.device)
+                rewards = torch.sum(rewards * weights, axis=-1, keepdim=True)
                 dones = dones.reshape(self.num_envs, self.num_agents)
                 data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic
 
@@ -118,11 +116,14 @@ class DroneRunner(Runner):
                 self.insert(data)
 
                 # record statistics
+                episode_train_reward.add_(rewards.squeeze())
                 env_dones = dones.all(-1)
                 if env_dones.any():
                     episode_info: Dict = infos.get("episode", {})
                     for k, v in episode_info.items():
                         episode_infos[k].append(v[env_dones])
+                    episode_infos["train_reward"].append(episode_train_reward[env_dones])
+                    episode_train_reward[env_dones] = 0
                     total_episodes += env_dones.sum()
 
                 inf_step_time += _inf_end - _step_start
@@ -169,14 +170,14 @@ class DroneRunner(Runner):
                 self.buffer.rnn_states_critic[step].flatten(end_dim=1),
                 self.buffer.masks[step].flatten(end_dim=1))
         # [self.envs, agents, dim]
-        values = value.reshape(self.n_rollout_threads, self.num_agents, -1)
-        actions = action.reshape(self.n_rollout_threads, self.num_agents, -1)
+        values = value.reshape(self.num_envs, self.num_agents, -1)
+        actions = action.reshape(self.num_envs, self.num_agents, -1)
         action_log_probs = action_log_prob.reshape(
-            self.n_rollout_threads, self.num_agents, -1)
+            self.num_envs, self.num_agents, -1)
         rnn_states = rnn_states.reshape(
-            self.n_rollout_threads, self.num_agents, *rnn_states.shape[1:])
+            self.num_envs, self.num_agents, *rnn_states.shape[1:])
         rnn_states_critic = rnn_states_critic.reshape(
-            self.n_rollout_threads, self.num_agents, *rnn_states_critic.shape[1:])
+            self.num_envs, self.num_agents, *rnn_states_critic.shape[1:])
 
         return values, actions, action_log_probs, rnn_states, rnn_states_critic
 
@@ -188,10 +189,10 @@ class DroneRunner(Runner):
 
         dones_env = torch.all(dones, axis=1)
 
-        masks = torch.ones((self.n_rollout_threads, self.num_agents, 1))
+        masks = torch.ones((self.num_envs, self.num_agents, 1))
         masks[dones == True] = 0
 
-        active_masks = torch.ones((self.n_rollout_threads, self.num_agents, 1))
+        active_masks = torch.ones((self.num_envs, self.num_agents, 1))
         active_masks[dones == True] = 0
         active_masks[dones_env == True] = 1
 
