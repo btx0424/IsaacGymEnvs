@@ -782,3 +782,8 @@ class MultiAgentVecTask(VecTask):
         self.randomize_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
         self.extras = {}
+    
+    def agents_step(self, 
+            action_dict: Dict[str, torch.Tensor]
+        ) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
+        raise NotImplementedError

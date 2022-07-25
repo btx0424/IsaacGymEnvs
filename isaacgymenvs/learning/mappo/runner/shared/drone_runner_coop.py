@@ -1,7 +1,7 @@
 from collections import defaultdict
 from dataclasses import dataclass
 import time
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, Union
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from isaacgymenvs.tasks.quadrotor import QuadrotorBase
 import numpy as np
@@ -12,6 +12,7 @@ from .base_runner import Runner
 from isaacgymenvs.learning.mappo.algorithms.rmappo import MAPPOPolicy
 from isaacgymenvs.learning.mappo.utils.shared_buffer import SharedReplayBuffer
 
+Agent = str
 
 @dataclass
 class RunnerConfig:
@@ -40,6 +41,7 @@ class DroneRunner(Runner):
 
         self.num_envs = cfg.num_envs
         self.num_agents = cfg.num_agents
+        self.agents = ["predator", "prey"]
 
         self.device = cfg.rl_device
         all_args = config["all_args"]
@@ -56,38 +58,51 @@ class DroneRunner(Runner):
 
         envs: MultiAgentVecTask = config["envs"]
 
-        self.policy = MAPPOPolicy(
+        self.policies: Dict[str, MAPPOPolicy] = {}
+        self.policies["predator"] = MAPPOPolicy(
             self.all_args,
             envs.obs_space,
             envs.state_space,
             envs.act_space)
+        self.policies["prey"] = None
+        self.policy = self.policies["predator"]
 
-        self.buffer = SharedReplayBuffer(
+        self.buffers: Dict[str, SharedReplayBuffer] = {}
+        self.buffers["predator"] = SharedReplayBuffer(
             self.all_args,
             self.num_envs,
             self.num_agents,
             envs.obs_space,
             envs.state_space,
             envs.act_space)
+        self.buffer = self.buffers["predator"]
+
+        # timers & counters
+        self.env_step_time = 0
+        self.inf_step_time = 0
+        
+        self.total_env_steps = 0
+        self.total_episodes = 0
 
     def run(self):
-        obs = self.envs.reset()["obs"]
-        obs = obs.reshape(self.num_envs, self.num_agents, *obs.shape[1:])
-        share_obs = obs
-
-        self.buffer.share_obs[0] = share_obs
-        self.buffer.obs[0] = obs
+        obs_dict = self.envs.reset()
+        rnn_states_dict = {
+            agent: policy.get_initial_rnn_states(self.num_envs*self.num_agents)
+            for agent, policy in self.policies.items() if policy is not None
+        }
+        masks_dict = {
+            agent: torch.ones((self.num_envs, self.num_agents, 1))
+            for agent in self.agents
+        }
+        for agent, agent_obs_dict in obs_dict.items():
+            buffer: Union[SharedReplayBuffer, None] = self.buffers.get(agent)
+            if buffer:
+                buffer.obs[0] = agent_obs_dict["obs"].reshape(self.num_envs, self.num_agents, -1)
+                buffer.share_obs[0] = agent_obs_dict["state"].reshape(self.num_envs, self.num_agents, -1)
 
         start = time.perf_counter()
 
-        env_step_time = 0
-        inf_step_time = 0
-
-        total_env_steps = 0
-        total_episodes = 0
-
         episode_infos = defaultdict(lambda: [])
-        episode_train_reward = torch.zeros(self.num_envs, self.num_agents, device=self.device)
 
         for iteration in range(self.max_iterations):
 
@@ -97,51 +112,76 @@ class DroneRunner(Runner):
             for step in range(self.num_steps):
                 # Sample actions
                 _step_start = time.perf_counter()
-                values, actions, action_log_probs, rnn_states, rnn_states_critic = self.collect(step)
+
+                action_dict = {}
+                action_log_prob_dict = {}
+                value_dict = {}
+                rnn_state_actor_dict = {}
+                rnn_state_critic_dict = {}
+
+                for agent, agent_obs_dict in obs_dict.items():
+                    policy: MAPPOPolicy = self.policies[agent]
+                    policy.prep_rollout()
+                    rnn_state_actor, rnn_state_critic = rnn_states_dict.get("agent", (None, None))                  
+                    masks = masks_dict.get(agent, None)
+                    with torch.no_grad():
+                        result_dict = policy.get_action_and_value(
+                            share_obs=agent_obs_dict["state"],
+                            obs=agent_obs_dict["obs"],
+                            rnn_states_actor=rnn_state_actor,
+                            rnn_states_critic=rnn_state_critic,
+                            masks=masks
+                        )
+                    action_dict[agent] = result_dict["action"]
+                    action_log_prob_dict[agent] = result_dict["action_log_prob"]
+                    value_dict[agent] = result_dict["value"]
+                    rnn_state_actor_dict[agent] = result_dict["rnn_state_actor"]
+                    rnn_state_critic_dict[agent] = result_dict["rnn_state_critic"]
+
                 _inf_end = time.perf_counter()
-                obs_dict, rewards, dones, infos = self.envs.step(actions)
+                step_result_dict, infos = self.envs.agents_step(action_dict)
+                env_dones: torch.Tensor = infos["env_dones"]
                 _env_end = time.perf_counter()
 
-                # for compatibility
-                obs = obs_dict["obs"]
-                obs = obs.reshape(
-                    self.num_envs, self.num_agents, *obs.shape[1:])
-                rewards = rewards.reshape(self.num_envs, self.num_agents, -1)
-                weights = torch.ones(rewards.shape[-1], device=rewards.device)
-                rewards = torch.sum(rewards * weights, axis=-1, keepdim=True)
-                dones = dones.reshape(self.num_envs, self.num_agents)
-                data = obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic
-
-                # insert data into buffer
-                self.insert(data)
+                for agent, (obs_dict, reward, done) in step_result_dict.items():
+                    buffer = self.buffers.get(agent)
+                    if buffer:
+                        data = (
+                            obs_dict["obs"].reshape(self.num_envs, self.num_agents, -1),
+                            reward, 
+                            done, 
+                            value_dict[agent], 
+                            action_dict[agent].reshape(self.num_envs, self.num_agents, -1),
+                            action_log_prob_dict[agent].reshape(self.num_envs, self.num_agents, -1),
+                            rnn_state_actor_dict[agent].reshape(self.num_envs, self.num_agents, -1),
+                            rnn_state_critic_dict[agent].reshape(self.num_envs, self.num_agents, -1)
+                        )
+                        self.insert(data, buffer)
 
                 # record statistics
-                episode_train_reward.add_(rewards.squeeze())
-                env_dones = dones.all(-1)
                 if env_dones.any():
                     episode_info: Dict = infos.get("episode", {})
                     for k, v in episode_info.items():
                         episode_infos[k].append(v[env_dones])
-                    episode_infos["train_reward"].append(episode_train_reward[env_dones])
-                    episode_train_reward[env_dones] = 0
-                    total_episodes += env_dones.sum()
+                    self.total_episodes += env_dones.sum()
 
-                inf_step_time += _inf_end - _step_start
-                env_step_time += _env_end - _inf_end
-
+                self.inf_step_time += _inf_end - _step_start
+                self.env_step_time += _env_end - _inf_end
+            
+            raise
             # compute return and update network
             self.compute()
             train_infos = self.train()
 
-            total_env_steps += self.num_steps * self.num_envs
+            self.total_env_steps += self.num_steps * self.num_envs
 
             # log information
             if iteration % self.log_interval == 0:
                 end = time.perf_counter()
                 print(
-                    f"iteration: {iteration}/{self.max_iterations}, env steps: {total_env_steps}, episodes: {total_episodes}")
+                    f"iteration: {iteration}/{self.max_iterations}, env steps: {self.total_env_steps}, episodes: {self.total_episodes}")
                 print(
-                    f"runtime: {env_step_time:.2f} (env), {inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total), fps: {total_env_steps/(end-start):.2f}")
+                    f"runtime: {self.env_step_time:.2f} (env), {self.inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total), fps: {self.total_env_steps/(end-start):.2f}")
 
                 for k, v in episode_infos.items():
                     v = torch.cat(v).cpu().numpy().mean(0)
@@ -151,38 +191,16 @@ class DroneRunner(Runner):
 
                 episode_infos.clear()
 
-                train_infos["env_step"] = total_env_steps
-                train_infos["episode"] = total_episodes
+                train_infos["env_step"] = self.total_env_steps
+                train_infos["episode"] = self.total_episodes
                 train_infos["iteration"] = iteration
                 self.log(train_infos)
 
-            if total_env_steps > self.max_env_steps:
+            if self.total_env_steps > self.max_env_steps:
                 break
 
-    @torch.no_grad()
-    def collect(self, step) -> Tuple[torch.Tensor, ...]:
-        self.policy.prep_rollout()
-        value, action, action_log_prob, rnn_states, rnn_states_critic \
-            = self.policy.get_actions(
-                self.buffer.share_obs[step].flatten(end_dim=1),
-                self.buffer.obs[step].flatten(end_dim=1),
-                self.buffer.rnn_states[step].flatten(end_dim=1),
-                self.buffer.rnn_states_critic[step].flatten(end_dim=1),
-                self.buffer.masks[step].flatten(end_dim=1))
-        # [self.envs, agents, dim]
-        values = value.reshape(self.num_envs, self.num_agents, -1)
-        actions = action.reshape(self.num_envs, self.num_agents, -1)
-        action_log_probs = action_log_prob.reshape(
-            self.num_envs, self.num_agents, -1)
-        rnn_states = rnn_states.reshape(
-            self.num_envs, self.num_agents, *rnn_states.shape[1:])
-        rnn_states_critic = rnn_states_critic.reshape(
-            self.num_envs, self.num_agents, *rnn_states_critic.shape[1:])
-
-        return values, actions, action_log_probs, rnn_states, rnn_states_critic
-
-    def insert(self, data):
-        obs, rewards, dones, infos, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
+    def insert(self, data, buffer: SharedReplayBuffer = None):
+        obs, rewards, dones, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
 
         rnn_states[dones == True] = 0
         rnn_states_critic[dones == True] = 0
@@ -198,7 +216,7 @@ class DroneRunner(Runner):
 
         share_obs = obs
 
-        self.buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions,
+        buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions,
                            action_log_probs, values, rewards, masks, active_masks=active_masks)
 
     def log(self, info: Dict[str, Any]):

@@ -31,6 +31,7 @@ class TensorTuple(Tuple[torch.Tensor, ...]):
     def flatten(self, start_dim: int = 0, end_dim: int = -1):
         return TensorTuple(v.flatten(start_dim, end_dim) for v in self)
 
+
 class QuadrotorBase(MultiAgentVecTask):
     
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
@@ -40,21 +41,32 @@ class QuadrotorBase(MultiAgentVecTask):
         cfg["env"]["numActions"] = 4
 
         self.cfg = cfg
-
+        
         self.actor_types = ["drone", "box", "sphere"]
-        self.box_states = torch.tensor([
+        _walls = torch.tensor([
             [-1, 0, 0.3, 0.05, 2., .6],
             [0, -1, 0.3, 2., 0.05, .6],
             [1, 0, 0.3, 0.05, 2., .6],
             [0, 1, 0.3, 2., 0.05, .6]], device=rl_device) * 3
-        # self.num_drones = cfg["env"]["numDrones"]
+        _obstacles = torch.tensor([
+            [1, 1, 0.3, 0.1, 0.1, 0.6],
+            [-1, -1, 0.3, 0.1, 0.1, 0.6]], device=rl_device)
+        self.boxes = []
+        self.boxes.append(_walls)
+        self.boxes.append(_obstacles)
+        self.box_states = torch.cat(self.boxes, dim=0)
+
         self.num_boxes = len(self.box_states)
+        self.num_targets = cfg["env"].get("numTargets", 2)
+
+        self.max_linear_velocity = cfg["env"].get("maxLinearVelocity", 2)
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
         self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim) 
         net_contact_forces = self.gym.acquire_net_contact_force_tensor(self.sim)
         
+        # prepare tensors
         vec_root_tensor: Tensor = gymtorch.wrap_tensor(self.root_tensor)
         vec_root_tensor = vec_root_tensor.view(self.num_envs, self.actors_per_env, 13) # (num_envs, env_actor_count, 13)
 
@@ -102,11 +114,14 @@ class QuadrotorBase(MultiAgentVecTask):
         asset_urdf_tree = ElementTree.parse(os.path.join(asset_root, asset_file)).getroot()
         self.KF = float(asset_urdf_tree[0].attrib['kf'])
         self.KM = float(asset_urdf_tree[0].attrib['km'])
+        self.THRUST2WEIGHT_RATIO = float(asset_urdf_tree[0].attrib['thrust2weight'])
         asset_options = gymapi.AssetOptions()
         asset_options.angular_damping = 0
         asset_options.linear_damping = 0
+        asset_options.max_linear_velocity = self.max_linear_velocity
 
         self.HOVER_RPM = math.sqrt(9.81 * 0.027 / (4*self.KF))
+        self.MAX_RPM = np.sqrt((self.THRUST2WEIGHT_RATIO*9.81) / (4*self.KF))
         self.TIME_STEP = self.sim_params.dt
         self.dt = self.sim_params.dt
         asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
@@ -154,13 +169,10 @@ class QuadrotorBase(MultiAgentVecTask):
                 drone_pose.p.x += 0.2
                 drone_pose.p.y += 0.2
                 drone_pose.p.z += 0.15
-                sphere_handle = self.gym.create_actor(env, sphere_asset, sphere_pose, f"sphere_{i_agent}", i_env, 1)
                 if i_env == 0:
                     # actor index
                     env_actor_index["drone"].append(
                         self.gym.get_actor_index(env, drone_handle, gymapi.DOMAIN_ENV))
-                    env_actor_index["target"].append(
-                        self.gym.get_actor_index(env, sphere_handle, gymapi.DOMAIN_ENV))
                     # body index
                     env_body_index["prop"].extend([
                         self.gym.get_actor_rigid_body_index(env, drone_handle, body_index, gymapi.DOMAIN_ENV) 
@@ -168,6 +180,12 @@ class QuadrotorBase(MultiAgentVecTask):
                     env_body_index["base"].append(
                         self.gym.get_actor_rigid_body_index(env, drone_handle, 0, gymapi.DOMAIN_ENV))
                 sim_actor_index["drone"].append(self.gym.get_actor_index(env, drone_handle, gymapi.DOMAIN_SIM))
+
+            for i_target in range(self.num_targets):
+                sphere_handle = self.gym.create_actor(env, sphere_asset, sphere_pose, f"sphere_{i_target}", i_env, 1)
+                if i_env == 0:
+                    env_actor_index["target"].append(
+                        self.gym.get_actor_index(env, sphere_handle, gymapi.DOMAIN_ENV))
                 sim_actor_index["target"].append(self.gym.get_actor_index(env, sphere_handle, gymapi.DOMAIN_SIM))
 
             for i_box in range(self.num_boxes):
@@ -221,7 +239,7 @@ class QuadrotorBase(MultiAgentVecTask):
         if len(reset_env_ids) > 0:
             self.reset_idx(reset_env_ids)
 
-        rpms = actions
+        rpms = torch.clamp(actions, 0, self.MAX_RPM)
         forces = rpms**2 * self.KF # (env, actor, 4)
         torques = rpms**2 * self.KM
         z_torques = (-torques[..., 0] + torques[..., 1] - torques[..., 2] + torques[..., 3]) # (env, actor)
@@ -266,7 +284,10 @@ class QuadrotorBase(MultiAgentVecTask):
         obs_dict = TensorDict(obs_dict)
         self.obs_processor(obs_dict)
 
-        info["episode"].update({"length": self.progress_buf})
+        info["episode"].update({
+            "length": self.progress_buf,
+        })
+        info["env_dones"] = self.reset_buf.all(-1)
         
         return obs_dict.flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info # TODO: check mappo and remove .clone()
 

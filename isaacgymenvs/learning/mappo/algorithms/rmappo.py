@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from torch.nn.functional import mse_loss
 import math
 from isaacgymenvs.learning.mappo.utils.valuenorm import ValueNorm
+from typing import Any, Dict, Tuple
 
 @dataclass
 class MAPPOPolicyConfig:
@@ -101,10 +102,16 @@ class MAPPOPolicy:
         update_linear_schedule(self.actor_optimizer, episode, episodes, self.lr)
         update_linear_schedule(self.critic_optimizer, episode, episodes, self.critic_lr)
 
-    def get_actions(self, share_obs, obs, rnn_states_actor, rnn_states_critic, masks, available_actions=None, deterministic=False):
+    def get_action_and_value(self, share_obs, obs, rnn_states_actor, rnn_states_critic, masks, available_actions=None, deterministic=False) -> Dict[str, torch.Tensor]:
         actions, action_log_probs, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
         values, rnn_states_critic = self.critic(share_obs, rnn_states_critic, masks)
-        return values, actions, action_log_probs, rnn_states_actor, rnn_states_critic
+        return {
+            "value": values, 
+            "action": actions, 
+            "action_log_prob": action_log_probs, 
+            "rnn_state_actor": rnn_states_actor, 
+            "rnn_state_critic": rnn_states_critic
+        }
 
     def get_values(self, share_obs, rnn_states_critic, masks):
         values, critic_states = self.critic(share_obs, rnn_states_critic, masks)
@@ -266,3 +273,12 @@ class MAPPOPolicy:
     def prep_rollout(self):
         self.actor.eval()
         self.critic.eval()
+    
+    def get_initial_rnn_states(self, batch_size):
+        if self._use_recurrent_policy or self._use_naive_recurrent:
+            return (
+                torch.zeros(batch_size, self.actor._recurrent_N, self.actor.hidden_size, device=self.device),
+                torch.zeros(batch_size, self.critic._recurrent_N, self.actor.hidden_size, device=self.device)
+            )
+        else:
+            return (None, None)

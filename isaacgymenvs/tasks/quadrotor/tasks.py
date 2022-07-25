@@ -19,6 +19,7 @@ class OccupationIndependent(QuadrotorBase):
         self.capture_radius: float = cfg.get("captureRadius", 0.3)
         self.success_threshold: int = cfg.get("successThreshold", 50)
         self.target_speed: float = cfg.get("targetSpeed", 1.)
+        self.agents = ["predator"]
 
     def allocate_buffers(self):
         super().allocate_buffers()
@@ -52,7 +53,7 @@ class OccupationIndependent(QuadrotorBase):
             obs_tensor.append(states_target)
             obs_tensor.append(states_all)
             obs_tensor.append(states_self)
-            obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
+            obs_dict["state"] = obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
             return obs_dict
         self.obs_split = [(1, 13), (self.num_agents, 13), (1, 13)]
         self.obs_processor = obs_processor
@@ -133,14 +134,24 @@ class OccupationIndependent(QuadrotorBase):
         self.root_positions[env_ids] = env_positions
         self.root_linvels[env_ids] = env_velocities
 
+    def agents_step(self, action_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
+        obs_dict, reward, done, info = self.step(action_dict["predator"])
+        return {"predator": (obs_dict, reward, done)}, info
+
+    def reset(self) -> Dict[str, torch.Tensor]:
+        obs_dict =  super().reset()
+        return {"predator": obs_dict}
+
 class PredatorPrey(QuadrotorBase):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
+        raise NotImplementedError
         cfg["env"]["numRewards"] = 3 # [distance, collision, capture]
         
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         # task specification
         self.capture_radius: float = cfg.get("captureRadius", 0.3)
         self.success_threshold: int = cfg.get("successThreshold", 50)
+        self.agents = ["predator", "prey"]
 
     def allocate_buffers(self):
         super().allocate_buffers()
@@ -174,7 +185,7 @@ class PredatorPrey(QuadrotorBase):
             obs_tensor.append(states_target)
             obs_tensor.append(states_all)
             obs_tensor.append(states_self)
-            obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
+            obs_dict["state"] = obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
             return obs_dict
         self.obs_split = [(1, 13), (self.num_agents, 13), (1, 13)]
         self.obs_processor = obs_processor

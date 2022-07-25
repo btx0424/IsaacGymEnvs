@@ -68,17 +68,11 @@ class R_Actor(nn.Module):
 
         self.to(device)
 
-    def forward(self, obs, rnn_states, masks, available_actions=None, deterministic=False):        
-        if self._mixed_obs:
-            for key in obs.keys():
-                obs[key] = check(obs[key]).to(**self.tpdv)
-        else:
-            obs = check(obs).to(**self.tpdv)
-        rnn_states = check(rnn_states).to(**self.tpdv)
-        masks = check(masks).to(**self.tpdv)
-
-        if available_actions is not None:
-            available_actions = check(available_actions).to(**self.tpdv)
+    def forward(self, 
+            obs, 
+            rnn_states, 
+            masks, 
+            available_actions=None, deterministic=False):
 
         actor_features = self.base(obs)
 
@@ -94,21 +88,6 @@ class R_Actor(nn.Module):
         return actions, action_log_probs, rnn_states
 
     def evaluate_actions(self, obs, rnn_states, action, masks, available_actions=None, active_masks=None):
-        if self._mixed_obs:
-            for key in obs.keys():
-                obs[key] = check(obs[key]).to(**self.tpdv)
-        else:
-            obs = check(obs).to(**self.tpdv)
-
-        rnn_states = check(rnn_states).to(**self.tpdv)
-        action = check(action).to(**self.tpdv)
-        masks = check(masks).to(**self.tpdv)
-
-        if available_actions is not None:
-            available_actions = check(available_actions).to(**self.tpdv)
-        
-        if active_masks is not None:
-            active_masks = check(active_masks).to(**self.tpdv)
         
         actor_features = self.base(obs)
         
@@ -196,13 +175,6 @@ class R_Critic(nn.Module):
         self.to(device)
 
     def forward(self, share_obs, rnn_states, masks):
-        if self._mixed_obs:
-            for key in share_obs.keys():
-                share_obs[key] = check(share_obs[key]).to(**self.tpdv)
-        else:
-            share_obs = check(share_obs).to(**self.tpdv)
-        rnn_states = check(rnn_states).to(**self.tpdv)
-        masks = check(masks).to(**self.tpdv)
 
         critic_features = self.base(share_obs)
 

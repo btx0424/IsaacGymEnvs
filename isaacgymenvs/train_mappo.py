@@ -1,3 +1,4 @@
+from argparse import Namespace
 import gym
 import hydra
 import isaacgym
@@ -24,7 +25,7 @@ def create_envs(cfg) -> MultiAgentVecTask:
     )
     return env
 
-@hydra.main(config_name="mappo", config_path="./cfg")
+@hydra.main(config_name="mappo", config_path="./cfg", version_base=None)
 def main(cfg):
     OmegaConf.set_struct(cfg, False)
     time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -43,25 +44,35 @@ def main(cfg):
     print(OmegaConf.to_yaml(cfg))
     print(envs)
 
-    config = {
-        "cfg": cfg,
-        "all_args": cfg.params,
-        "envs": envs,
-        "device": "cuda",
-    }
-
-    run = wandb.init(
-        project=cfg.wandb_project,
-        group=cfg.wandb_group,
-        entity=cfg.wandb_entity,
-        config=OmegaConf.to_container(cfg, resolve=True),
-        monitor_gym=True,
-        name=run_name,
-        resume="allow",
-    )
-
-    runner = DroneRunner(config)
-    runner.run()
+    if cfg.wandb_activate:
+        with wandb.init(
+            project=cfg.wandb_project,
+            group=cfg.wandb_group,
+            entity=cfg.wandb_entity,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            monitor_gym=True,
+            name=run_name,
+            resume="allow",
+        ) as run:
+            cfg = wandb.config
+            config = {
+                "cfg": cfg,
+                "all_args": Namespace(**cfg.params),
+                "envs": envs,
+                "device": "cuda",
+            }
+            runner = DroneRunner(config)
+            runner.run()
+    else:
+        config = {
+            "cfg": cfg,
+            "all_args": cfg.params,
+            "envs": envs,
+            "device": "cuda",
+        }
+        runner = DroneRunner(config)
+        runner.run()
+        
 
 if __name__ == "__main__":
     main()

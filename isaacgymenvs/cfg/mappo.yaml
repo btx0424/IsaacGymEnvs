@@ -5,7 +5,8 @@ task_name: ${task.name}
 experiment: ''
 
 # if set to positive integer, overrides the default number of environments
-num_envs: 8192
+num_envs: 16384
+num_eval_envs: 4
 num_agents: ${task.env.numAgents}
 log_interval: 5
 
@@ -15,7 +16,7 @@ seed: 42
 torch_deterministic: False
 
 # set the maximum number of learning iterations to train for. overrides default per-environment setting
-max_iterations: 500
+max_iterations: 1000
 max_env_steps: 50_000_000
 
 ## Device config
@@ -32,8 +33,8 @@ graphics_device_id: ${cuda_id}
 
 params:
   # ppo
-  num_steps: 32
-  num_mini_batch: 8 
+  num_steps: 16
+  num_mini_batch: 16
   ppo_epoch: 5
   clip_param: 0.2
   entropy_coef: 0.01
@@ -143,4 +144,5 @@ solver_type: 1 # 0: pgs, 1: tgs
 num_subscenes: 4 # Splits the simulation into N physics scenes and runs each one in a separate thread
 
 defaults:
-  - task: Quadrotor
+  - task: QuadrotorOccupationI
+  - _self_
