@@ -105,8 +105,11 @@ class SharedReplayBuffer(object):
             self.share_obs[self.step + 1] = share_obs
             self.obs[self.step + 1] = obs
 
-        self.rnn_states[self.step + 1] = rnn_states
-        self.rnn_states_critic[self.step + 1] = rnn_states_critic
+        if rnn_states is not None:
+            self.rnn_states[self.step + 1] = rnn_states
+        if rnn_states_critic is not None:
+            self.rnn_states_critic[self.step + 1] = rnn_states_critic
+        
         self.actions[self.step] = actions
         self.action_log_probs[self.step] = action_log_probs
         self.value_preds[self.step] = value_preds

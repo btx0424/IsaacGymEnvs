@@ -4,6 +4,7 @@ import time
 from typing import Any, Dict, Tuple, Union
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from isaacgymenvs.tasks.quadrotor import QuadrotorBase
+from isaacgymenvs.tasks.quadrotor.base import TensorDict
 import numpy as np
 import torch
 import wandb
@@ -86,6 +87,7 @@ class DroneRunner(Runner):
 
     def run(self):
         obs_dict = self.envs.reset()
+        assert "predator" in obs_dict.keys()
         rnn_states_dict = {
             agent: policy.get_initial_rnn_states(self.num_envs*self.num_agents)
             for agent, policy in self.policies.items() if policy is not None
@@ -113,11 +115,11 @@ class DroneRunner(Runner):
                 # Sample actions
                 _step_start = time.perf_counter()
 
-                action_dict = {}
-                action_log_prob_dict = {}
-                value_dict = {}
-                rnn_state_actor_dict = {}
-                rnn_state_critic_dict = {}
+                action_dict = TensorDict()
+                action_log_prob_dict = TensorDict()
+                value_dict = TensorDict()
+                rnn_state_actor_dict = TensorDict()
+                rnn_state_critic_dict = TensorDict()
 
                 for agent, agent_obs_dict in obs_dict.items():
                     policy: MAPPOPolicy = self.policies[agent]
@@ -143,18 +145,23 @@ class DroneRunner(Runner):
                 env_dones: torch.Tensor = infos["env_dones"]
                 _env_end = time.perf_counter()
 
-                for agent, (obs_dict, reward, done) in step_result_dict.items():
+                for agent, (agent_obs_dict, agent_reward, agent_done) in step_result_dict.items():
+                    # TODO: complete reward shaping
+                    agent_reward = agent_reward.sum(-1)
+                    obs_dict[agent] = agent_obs_dict
+                    masks_dict[agent] = 1.0 - agent_done
+
                     buffer = self.buffers.get(agent)
                     if buffer:
                         data = (
-                            obs_dict["obs"].reshape(self.num_envs, self.num_agents, -1),
-                            reward, 
-                            done, 
-                            value_dict[agent], 
+                            agent_obs_dict["obs"].reshape(self.num_envs, self.num_agents, -1),
+                            agent_reward.reshape(self.num_envs, self.num_agents, 1),
+                            agent_done.reshape(self.num_envs, self.num_agents, 1),
+                            value_dict[agent].reshape(self.num_envs, self.num_agents, 1),
                             action_dict[agent].reshape(self.num_envs, self.num_agents, -1),
                             action_log_prob_dict[agent].reshape(self.num_envs, self.num_agents, -1),
-                            rnn_state_actor_dict[agent].reshape(self.num_envs, self.num_agents, -1),
-                            rnn_state_critic_dict[agent].reshape(self.num_envs, self.num_agents, -1)
+                            rnn_state_actor_dict[agent],
+                            rnn_state_critic_dict[agent]
                         )
                         self.insert(data, buffer)
 
@@ -202,22 +209,21 @@ class DroneRunner(Runner):
     def insert(self, data, buffer: SharedReplayBuffer = None):
         obs, rewards, dones, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
 
-        rnn_states[dones == True] = 0
-        rnn_states_critic[dones == True] = 0
-
-        dones_env = torch.all(dones, axis=1)
+        if rnn_states is not None:
+            rnn_states[dones == True] = 0
+        if rnn_states_critic is not None:
+            rnn_states_critic[dones == True] = 0
 
         masks = torch.ones((self.num_envs, self.num_agents, 1))
         masks[dones == True] = 0
 
-        active_masks = torch.ones((self.num_envs, self.num_agents, 1))
-        active_masks[dones == True] = 0
-        active_masks[dones_env == True] = 1
-
         share_obs = obs
 
-        buffer.insert(share_obs, obs, rnn_states, rnn_states_critic, actions,
-                           action_log_probs, values, rewards, masks, active_masks=active_masks)
+        buffer.insert(
+            share_obs, obs, 
+            rnn_states, rnn_states_critic, 
+            actions, action_log_probs, 
+            values, rewards, masks)
 
     def log(self, info: Dict[str, Any]):
         wandb.log({f"{k}": v for k, v in info.items()})

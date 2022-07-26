@@ -4,7 +4,7 @@ import numpy as np
 from isaacgym import gymtorch
 from gym import spaces
 from typing import Any, Dict, Tuple
-from .base import QuadrotorBase
+from .base import QuadrotorBase, TensorDict
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
     return x / (1e-7 + x.norm(dim=-1, keepdim=True))
@@ -138,8 +138,8 @@ class OccupationIndependent(QuadrotorBase):
         obs_dict, reward, done, info = self.step(action_dict["predator"])
         return {"predator": (obs_dict, reward, done)}, info
 
-    def reset(self) -> Dict[str, torch.Tensor]:
-        obs_dict =  super().reset()
+    def reset(self) -> Dict[str, TensorDict]:
+        obs_dict = super().reset()
         return {"predator": obs_dict}
 
 class PredatorPrey(QuadrotorBase):
