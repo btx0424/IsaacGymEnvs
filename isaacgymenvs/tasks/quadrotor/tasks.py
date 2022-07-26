@@ -265,8 +265,8 @@ class PredatorPrey(QuadrotorBase):
     
     def reset_actors(self, env_ids):
         super().reset_actors(env_ids)
-        spacing = torch.linspace(0, self.max_episode_length, self.num_agents+1, device=self.device)[:-1]
-        rad = (self.progress_buf[env_ids].unsqueeze(-1)+spacing)/self.max_episode_length*math.pi*2
+        spacing = torch.linspace(0, self.max_episode_length, self.num_targets+1, device=self.device)[:-1]
+        rad = spacing / self.max_episode_length * math.pi*2
         env_positions = self.root_positions[env_ids]
         env_velocities = self.root_linvels[env_ids]
         env_positions[:, self.env_actor_index["target"], 0] = torch.sin(rad)
