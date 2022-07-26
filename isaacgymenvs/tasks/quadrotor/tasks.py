@@ -65,6 +65,8 @@ class OccupationIndependent(QuadrotorBase):
         contact = self.contact_forces[:, self.env_body_index["base"]]
 
         target_distance = torch.norm(self.target_pos-pos, dim=-1)
+        # a little trick
+        target_distance = (target_distance - self.capture_radius*1.2).clamp(min=0)
         distance_reward = 1.0 / (1.0 + target_distance ** 2)
         spinnage = torch.abs(angvel[..., 2])
         spinnage_reward = 1.0 / (1.0 + spinnage * spinnage)
@@ -89,11 +91,12 @@ class OccupationIndependent(QuadrotorBase):
         self.reset_buf[pos[..., 2] < 0.1] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
 
+        cum_rew = self.cum_rew_buf.clone()
         self.extras["episode"].update({
-            "reward/distance": self.cum_rew_buf[..., 0],
-            "reward/collision": self.cum_rew_buf[..., 1],
-            "reward/progress": self.cum_rew_buf[..., 2],
-            "reward/capture": self.cum_rew_buf[..., 3],
+            "reward/distance": cum_rew[..., 0],
+            "reward/collision": cum_rew[..., 1],
+            "reward/progress": cum_rew[..., 2],
+            "reward/capture": cum_rew[..., 3],
             
             "success": (self.captured_steps_buf > self.success_threshold).float(),
         })
@@ -144,9 +147,9 @@ class OccupationIndependent(QuadrotorBase):
 
 class PredatorPrey(QuadrotorBase):
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
-        raise NotImplementedError
         cfg["env"]["numRewards"] = 3 # [distance, collision, capture]
-        
+        cfg["env"]["numTargets"] = 1
+
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         # task specification
         self.capture_radius: float = cfg.get("captureRadius", 0.3)
@@ -219,10 +222,11 @@ class PredatorPrey(QuadrotorBase):
         self.reset_buf[pos[..., 2] < 0.1] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
 
+        cum_rew_buf = self.cum_rew_buf.clone()
         self.extras["episode"].update({
-            "reward/distance": self.cum_rew_buf[..., 0],
-            "reward/collision": self.cum_rew_buf[..., 1],
-            "reward/capture": self.cum_rew_buf[..., 2],
+            "reward/distance": cum_rew_buf[..., 0],
+            "reward/collision": cum_rew_buf[..., 1],
+            "reward/capture": cum_rew_buf[..., 2],
             
             "success": (self.captured_steps_buf > self.success_threshold).float(),
         })
@@ -271,3 +275,11 @@ class PredatorPrey(QuadrotorBase):
         env_velocities[:, self.env_actor_index["target"]] = 0
         self.root_positions[env_ids] = env_positions
         self.root_linvels[env_ids] = env_velocities
+    
+    def agents_step(self, action_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
+        obs_dict, reward, done, info = self.step(action_dict["predator"])
+        return {"predator": (obs_dict, reward, done)}, info
+    
+    def reset(self) -> Dict[str, torch.Tensor]:
+        obs_dict = super().reset()
+        return {"predator": obs_dict}

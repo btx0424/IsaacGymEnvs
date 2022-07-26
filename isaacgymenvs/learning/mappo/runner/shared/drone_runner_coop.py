@@ -65,8 +65,6 @@ class DroneRunner(Runner):
             envs.obs_space,
             envs.state_space,
             envs.act_space)
-        self.policies["prey"] = None
-        self.policy = self.policies["predator"]
 
         self.buffers: Dict[str, SharedReplayBuffer] = {}
         self.buffers["predator"] = SharedReplayBuffer(
@@ -76,7 +74,6 @@ class DroneRunner(Runner):
             envs.obs_space,
             envs.state_space,
             envs.act_space)
-        self.buffer = self.buffers["predator"]
 
         # timers & counters
         self.env_step_time = 0
@@ -87,13 +84,13 @@ class DroneRunner(Runner):
 
     def run(self):
         obs_dict = self.envs.reset()
-        assert "predator" in obs_dict.keys()
+
         rnn_states_dict = {
             agent: policy.get_initial_rnn_states(self.num_envs*self.num_agents)
             for agent, policy in self.policies.items() if policy is not None
         }
         masks_dict = {
-            agent: torch.ones((self.num_envs, self.num_agents, 1))
+            agent: torch.ones((self.num_envs * self.num_agents, 1), device=self.device)
             for agent in self.agents
         }
         for agent, agent_obs_dict in obs_dict.items():
@@ -124,8 +121,8 @@ class DroneRunner(Runner):
                 for agent, agent_obs_dict in obs_dict.items():
                     policy: MAPPOPolicy = self.policies[agent]
                     policy.prep_rollout()
-                    rnn_state_actor, rnn_state_critic = rnn_states_dict.get("agent", (None, None))                  
-                    masks = masks_dict.get(agent, None)
+                    rnn_state_actor, rnn_state_critic = rnn_states_dict[agent]                 
+                    masks = masks_dict[agent]
                     with torch.no_grad():
                         result_dict = policy.get_action_and_value(
                             share_obs=agent_obs_dict["state"],
@@ -149,7 +146,7 @@ class DroneRunner(Runner):
                     # TODO: complete reward shaping
                     agent_reward = agent_reward.sum(-1)
                     obs_dict[agent] = agent_obs_dict
-                    masks_dict[agent] = 1.0 - agent_done
+                    masks_dict[agent] = (1.0 - agent_done).reshape(self.num_envs * self.num_agents, 1)
 
                     buffer = self.buffers.get(agent)
                     if buffer:
@@ -175,7 +172,6 @@ class DroneRunner(Runner):
                 self.inf_step_time += _inf_end - _step_start
                 self.env_step_time += _env_end - _inf_end
             
-            raise
             # compute return and update network
             self.compute()
             train_infos = self.train()
@@ -210,12 +206,14 @@ class DroneRunner(Runner):
         obs, rewards, dones, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
 
         if rnn_states is not None:
-            rnn_states[dones == True] = 0
+            rnn_states = rnn_states.reshape(self.num_envs, self.num_agents, *rnn_states.shape[1:])
+            rnn_states[dones] = 0
         if rnn_states_critic is not None:
-            rnn_states_critic[dones == True] = 0
+            rnn_states_critic = rnn_states_critic.reshape(self.num_envs, self.num_agents, *rnn_states_critic.shape[1:])
+            rnn_states_critic[dones] = 0
 
         masks = torch.ones((self.num_envs, self.num_agents, 1))
-        masks[dones == True] = 0
+        masks[dones] = 0
 
         share_obs = obs
 
@@ -224,6 +222,28 @@ class DroneRunner(Runner):
             rnn_states, rnn_states_critic, 
             actions, action_log_probs, 
             values, rewards, masks)
+
+    @torch.no_grad()
+    def compute(self):
+        for agent, policy in self.policies.items():
+            buffer = self.buffers.get(agent)
+            next_values = policy.get_values(
+                buffer.share_obs[-1].flatten(end_dim=1),
+                buffer.rnn_states_critic[-1].flatten(end_dim=1),
+                buffer.masks[-1].flatten(end_dim=1))
+            next_values = next_values.reshape(self.num_envs, self.num_agents, 1)
+            buffer.compute_returns(next_values, policy.value_normalizer)
+    
+    def train(self) -> Dict[str, Any]:
+        train_infos = {}
+        for agent, policy in self.policies.items():
+            if isinstance(policy, MAPPOPolicy):
+                buffer = self.buffers[agent]
+                policy.prep_training()
+                train_infos[agent] = policy.train(buffer)      
+                buffer.after_update()
+        self.log_system()
+        return train_infos
 
     def log(self, info: Dict[str, Any]):
         wandb.log({f"{k}": v for k, v in info.items()})

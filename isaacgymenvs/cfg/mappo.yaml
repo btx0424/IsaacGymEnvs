@@ -33,7 +33,7 @@ graphics_device_id: ${cuda_id}
 
 params:
   # ppo
-  num_steps: 16
+  num_steps: 8
   num_mini_batch: 16
   ppo_epoch: 5
   clip_param: 0.2

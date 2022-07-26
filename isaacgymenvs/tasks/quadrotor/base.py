@@ -246,8 +246,6 @@ class QuadrotorBase(MultiAgentVecTask):
 
         self.forces[..., self.env_body_index["prop"], 2] = forces.reshape(self.num_envs, 4*self.num_agents)
         self.z_torques[..., self.env_body_index["base"], 2] = z_torques.reshape(self.num_envs, self.num_agents)
-        self.forces[reset_env_ids] = 0
-        self.z_torques[reset_env_ids] = 0
 
         self.gym.apply_rigid_body_force_tensors(self.sim, 
             gymtorch.unwrap_tensor(self.forces), 
@@ -260,6 +258,12 @@ class QuadrotorBase(MultiAgentVecTask):
         # self.compute_observations()
         self.compute_reward_and_reset()
         
+        env_dones = self.reset_buf.all(-1)
+        self.extras["env_dones"] = env_dones
+        self.extras["episode"].update({
+            "length": self.progress_buf.clone(),
+        })
+
         if self.viewer and self.viewer_lines:
             self.gym.clear_lines(self.viewer)
             for points, color in self.viewer_lines:
@@ -283,11 +287,6 @@ class QuadrotorBase(MultiAgentVecTask):
         obs_dict, reward, done, info = super().step(actions)
         obs_dict = TensorDict(obs_dict)
         self.obs_processor(obs_dict)
-
-        info["episode"].update({
-            "length": self.progress_buf,
-        })
-        info["env_dones"] = self.reset_buf.all(-1)
         
         return obs_dict.flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info # TODO: check mappo and remove .clone()
 

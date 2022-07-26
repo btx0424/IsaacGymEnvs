@@ -113,7 +113,7 @@ class MAPPOPolicy:
             "rnn_state_critic": rnn_states_critic
         }
 
-    def get_values(self, share_obs, rnn_states_critic, masks):
+    def get_values(self, share_obs, rnn_states_critic, masks) -> torch.Tensor:
         values, critic_states = self.critic(share_obs, rnn_states_critic, masks)
         return values
 
