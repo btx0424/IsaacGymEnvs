@@ -13,7 +13,6 @@ class MultiAgentRecordVideo(gym.wrappers.RecordVideo):
         env_done = dones.reshape(self.num_envs, self.num_agents)[0].all()
         if env_done:
             self.episode_id += 1
-
         if self.recording:
             if (self.recorded_frames-1) % 2 ==0: 
                 self.video_recorder.capture_frame()
@@ -29,6 +28,29 @@ class MultiAgentRecordVideo(gym.wrappers.RecordVideo):
 
         return observations, rewards, dones, infos
     
+    def agents_step(self, action_dict):
+        step_dict, info = self.env.agents_step(action_dict)
+        # increment steps and episodes
+        self.step_id += 1
+
+        env_done = info["env_dones"][0]
+        if env_done:
+            self.episode_id += 1
+        if self.recording:
+            if (self.recorded_frames-1) % 2 ==0: 
+                self.video_recorder.capture_frame()
+            self.recorded_frames += 1
+            if self.video_length > 0:
+                if self.recorded_frames > self.video_length:
+                    self.close_video_recorder()
+            elif env_done:
+                self.close_video_recorder()
+
+        elif self._video_enabled():
+            self.start_video_recorder()
+        
+        return step_dict, info
+        
     def close_video_recorder(self) -> None:
         super().close_video_recorder()
         self.env.enable_viewer_sync = False

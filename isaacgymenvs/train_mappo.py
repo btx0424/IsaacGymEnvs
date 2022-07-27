@@ -25,7 +25,7 @@ def create_envs(cfg) -> MultiAgentVecTask:
     )
     return env
 
-@hydra.main(config_name="mappo", config_path="./cfg", version_base=None)
+@hydra.main(config_name="mappo", config_path="./cfg")
 def main(cfg):
     OmegaConf.set_struct(cfg, False)
     time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")

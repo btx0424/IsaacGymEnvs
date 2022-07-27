@@ -41,8 +41,6 @@ class DroneRunner(Runner):
         self.log_interval = cfg.log_interval
 
         self.num_envs = cfg.num_envs
-        self.num_agents = cfg.num_agents
-        self.agents = ["predator", "prey"]
 
         self.device = cfg.rl_device
         all_args = config["all_args"]
@@ -55,25 +53,29 @@ class DroneRunner(Runner):
 
         super().__init__(config)
 
+        self.agents = self.envs.agents
+        self.num_agents = {
+            agent: getattr(self.envs, f"num_{agent}s") for agent in self.agents
+        }
         self.num_steps = all_args.num_steps
 
         envs: MultiAgentVecTask = config["envs"]
 
         self.policies: Dict[str, MAPPOPolicy] = {}
-        self.policies["predator"] = MAPPOPolicy(
-            self.all_args,
-            envs.obs_space,
-            envs.state_space,
-            envs.act_space)
-
         self.buffers: Dict[str, SharedReplayBuffer] = {}
-        self.buffers["predator"] = SharedReplayBuffer(
-            self.all_args,
-            self.num_envs,
-            self.num_agents,
-            envs.obs_space,
-            envs.state_space,
-            envs.act_space)
+        for agent in self.agents:
+            self.policies[agent] = MAPPOPolicy(
+                self.all_args,
+                envs.obs_space,
+                envs.state_space,
+                envs.act_space)
+            self.buffers[agent] = SharedReplayBuffer(
+                self.all_args,
+                self.num_envs,
+                self.num_agents[agent],
+                envs.obs_space,
+                envs.state_space,
+                envs.act_space)
 
         # timers & counters
         self.env_step_time = 0
@@ -86,18 +88,18 @@ class DroneRunner(Runner):
         obs_dict = self.envs.reset()
 
         rnn_states_dict = {
-            agent: policy.get_initial_rnn_states(self.num_envs*self.num_agents)
+            agent: policy.get_initial_rnn_states(self.num_envs*self.num_agents[agent])
             for agent, policy in self.policies.items() if policy is not None
         }
         masks_dict = {
-            agent: torch.ones((self.num_envs * self.num_agents, 1), device=self.device)
+            agent: torch.ones((self.num_envs * self.num_agents[agent], 1), device=self.device)
             for agent in self.agents
         }
         for agent, agent_obs_dict in obs_dict.items():
             buffer: Union[SharedReplayBuffer, None] = self.buffers.get(agent)
             if buffer:
-                buffer.obs[0] = agent_obs_dict["obs"].reshape(self.num_envs, self.num_agents, -1)
-                buffer.share_obs[0] = agent_obs_dict["state"].reshape(self.num_envs, self.num_agents, -1)
+                buffer.obs[0] = agent_obs_dict["obs"].reshape(self.num_envs, self.num_agents[agent], -1)
+                buffer.share_obs[0] = agent_obs_dict["state"].reshape(self.num_envs, self.num_agents[agent], -1)
 
         start = time.perf_counter()
 
@@ -145,18 +147,20 @@ class DroneRunner(Runner):
                 for agent, (agent_obs_dict, agent_reward, agent_done) in step_result_dict.items():
                     # TODO: complete reward shaping
                     agent_reward = agent_reward.sum(-1)
+                    
                     obs_dict[agent] = agent_obs_dict
-                    masks_dict[agent] = (1.0 - agent_done).reshape(self.num_envs * self.num_agents, 1)
+                    masks_dict[agent] = (1.0 - agent_done).reshape(self.num_envs * self.num_agents[agent], 1)
 
                     buffer = self.buffers.get(agent)
                     if buffer:
+                        num_agents = self.num_agents[agent]
                         data = (
-                            agent_obs_dict["obs"].reshape(self.num_envs, self.num_agents, -1),
-                            agent_reward.reshape(self.num_envs, self.num_agents, 1),
-                            agent_done.reshape(self.num_envs, self.num_agents, 1),
-                            value_dict[agent].reshape(self.num_envs, self.num_agents, 1),
-                            action_dict[agent].reshape(self.num_envs, self.num_agents, -1),
-                            action_log_prob_dict[agent].reshape(self.num_envs, self.num_agents, -1),
+                            agent_obs_dict["obs"].reshape(self.num_envs, num_agents, -1),
+                            agent_reward.reshape(self.num_envs, num_agents, 1),
+                            agent_done.reshape(self.num_envs, num_agents, 1),
+                            value_dict[agent].reshape(self.num_envs, num_agents, 1),
+                            action_dict[agent].reshape(self.num_envs, num_agents, -1),
+                            action_log_prob_dict[agent].reshape(self.num_envs, num_agents, -1),
                             rnn_state_actor_dict[agent],
                             rnn_state_critic_dict[agent]
                         )
@@ -206,13 +210,13 @@ class DroneRunner(Runner):
         obs, rewards, dones, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
 
         if rnn_states is not None:
-            rnn_states = rnn_states.reshape(self.num_envs, self.num_agents, *rnn_states.shape[1:])
+            rnn_states = rnn_states.reshape(self.num_envs, obs.size(1), *rnn_states.shape[1:])
             rnn_states[dones] = 0
         if rnn_states_critic is not None:
-            rnn_states_critic = rnn_states_critic.reshape(self.num_envs, self.num_agents, *rnn_states_critic.shape[1:])
+            rnn_states_critic = rnn_states_critic.reshape(self.num_envs, obs.size(1), *rnn_states_critic.shape[1:])
             rnn_states_critic[dones] = 0
 
-        masks = torch.ones((self.num_envs, self.num_agents, 1))
+        masks = torch.ones_like(dones)
         masks[dones] = 0
 
         share_obs = obs
@@ -231,7 +235,7 @@ class DroneRunner(Runner):
                 buffer.share_obs[-1].flatten(end_dim=1),
                 buffer.rnn_states_critic[-1].flatten(end_dim=1),
                 buffer.masks[-1].flatten(end_dim=1))
-            next_values = next_values.reshape(self.num_envs, self.num_agents, 1)
+            next_values = next_values.reshape(self.num_envs, self.num_agents[agent], 1)
             buffer.compute_returns(next_values, policy.value_normalizer)
     
     def train(self) -> Dict[str, Any]:

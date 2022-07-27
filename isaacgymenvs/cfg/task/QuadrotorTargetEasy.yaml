@@ -1,5 +1,5 @@
 # used to create the object
-name: QuadrotorOccupationI
+name: QuadrotorTargetEasy
 
 physics_engine: ${..physics_engine}
 

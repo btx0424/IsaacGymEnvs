@@ -144,5 +144,5 @@ solver_type: 1 # 0: pgs, 1: tgs
 num_subscenes: 4 # Splits the simulation into N physics scenes and runs each one in a separate thread
 
 defaults:
-  - task: QuadrotorOccupationI
+  - task: QuadrotorTargetEasy
   - _self_

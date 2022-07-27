@@ -280,7 +280,7 @@ class QuadrotorBase(MultiAgentVecTask):
     def compute_reward_and_reset(self):
         raise NotImplementedError
 
-    def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
+    def step(self, actions: torch.Tensor, flatten=True) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
         actions = actions.view(self.num_envs, self.num_agents, -1)
         actions = self.act_processor(actions)
 
@@ -288,15 +288,21 @@ class QuadrotorBase(MultiAgentVecTask):
         obs_dict = TensorDict(obs_dict)
         self.obs_processor(obs_dict)
         
-        return obs_dict.flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info # TODO: check mappo and remove .clone()
+        if flatten:
+            return obs_dict.flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info
+        else:
+            return obs_dict, reward, done, info
 
-    def reset(self) -> Dict[str, torch.Tensor]:
+    def reset(self, flatten=True) -> Dict[str, torch.Tensor]:
         self.reset_idx(torch.arange(self.num_envs))
         obs_dict = TensorDict(super().reset())
         self.obs_processor(obs_dict)
         self.extras["episode"] = {}
         self.viewer_lines = []
-        return obs_dict.flatten(end_dim=1)
+        if flatten:
+            return obs_dict.flatten(end_dim=1)
+        else:
+            return obs_dict
 
     def refresh_tensors(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)

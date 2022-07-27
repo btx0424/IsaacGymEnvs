@@ -1,2 +1,2 @@
 from .base import QuadrotorBase
-from .tasks import OccupationIndependent, PredatorPrey
+from .tasks import TargetEasy, TargetHard, PredatorPrey
