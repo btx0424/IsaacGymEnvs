@@ -414,8 +414,9 @@ class PredatorPrey(QuadrotorBase):
 
     def post_physics_step(self):
         if self.viewer:
-            predator_pos = self.predator_pos
-            prey_pos = self.prey_pos.expand_as(predator_pos)
+            predator_pos = self.predator_pos[0]
+            prey_pos = self.prey_pos[0].expand_as(predator_pos)
+
             points = torch.cat([predator_pos, prey_pos], dim=-1).cpu().numpy()
-            self.viewer_lines.append((points, [0, 1, 0]))
+            self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
         super().post_physics_step()

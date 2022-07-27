@@ -54,9 +54,12 @@ class DroneRunner(Runner):
         super().__init__(config)
 
         self.agents = self.envs.agents
-        self.num_agents = {
-            agent: getattr(self.envs, f"num_{agent}s") for agent in self.agents
-        }
+        if len(self.agents) > 1:
+            self.num_agents = {
+                agent: getattr(self.envs, f"num_{agent}s") for agent in self.agents
+            }
+        else:
+            self.num_agents = {self.agents[0]: self.envs.num_agents}
         self.num_steps = all_args.num_steps
 
         envs: MultiAgentVecTask = config["envs"]

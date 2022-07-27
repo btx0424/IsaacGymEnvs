@@ -356,7 +356,7 @@ class QuadrotorBase(MultiAgentVecTask):
                 target_pos = pos + actions.reshape(-1, 3)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], target_pos[:self.num_agents]], dim=1).cpu().numpy()
-                    self.viewer_lines.append(points, [1., 0., 0.])
+                    self.viewer_lines.append(points, [[1., 0., 0.]]*len(points))
                 rpms = self.controller.compute_control(
                     self.TIME_STEP,
                     pos, quat, vel, angvel,
@@ -375,7 +375,7 @@ class QuadrotorBase(MultiAgentVecTask):
                 target_vel = actions.reshape(-1, 3)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], pos[:self.num_agents] + target_vel[:self.num_agents]], dim=1).cpu().numpy()
-                    self.viewer_lines.append((points, [1., 0., 0.]))
+                    self.viewer_lines.append((points, [[1., 0., 0.]]*len(points)))
                 rpms = self.controller.compute_control(
                     self.TIME_STEP,
                     pos, quat, vel, angvel,
@@ -393,7 +393,7 @@ class QuadrotorBase(MultiAgentVecTask):
                 target_vel = (actions.reshape(-1, 3) - 1)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], pos[:self.num_agents] + target_vel[:self.num_agents]], dim=1).cpu().numpy()
-                    self.viewer_lines.append((points, [1., 0., 0.]))
+                    self.viewer_lines.append((points, [[1., 0., 0.]]*len(points)))
                 rpms = self.controller.compute_control(
                     self.TIME_STEP,
                     pos, quat, vel, angvel,

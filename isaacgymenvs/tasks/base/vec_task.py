@@ -45,7 +45,7 @@ import abc
 from abc import ABC
 
 EXISTING_SIM = None
-SCREEN_CAPTURE_RESOLUTION = (1027, 768)
+SCREEN_CAPTURE_RESOLUTION = (1400, 900)
 
 def _create_sim_once(gym, *args, **kwargs):
     global EXISTING_SIM
