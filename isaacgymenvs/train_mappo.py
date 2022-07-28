@@ -44,35 +44,25 @@ def main(cfg):
     print(OmegaConf.to_yaml(cfg))
     print(envs)
 
-    if cfg.wandb_activate:
-        with wandb.init(
-            project=cfg.wandb_project,
-            group=cfg.wandb_group,
-            entity=cfg.wandb_entity,
-            config=OmegaConf.to_container(cfg, resolve=True),
-            monitor_gym=True,
-            name=run_name,
-            resume="allow",
-        ) as run:
-            cfg = wandb.config
-            config = {
-                "cfg": cfg,
-                "all_args": Namespace(**cfg.params),
-                "envs": envs,
-                "device": "cuda",
-            }
-            runner = DroneRunner(config)
-            runner.run()
-    else:
-        config = {
-            "cfg": cfg,
-            "all_args": cfg.params,
-            "envs": envs,
-            "device": "cuda",
-        }
-        runner = DroneRunner(config)
-        runner.run()
+    run = wandb.init(
+        project=cfg.wandb_project,
+        group=cfg.wandb_group,
+        entity=cfg.wandb_entity,
+        config=OmegaConf.to_container(cfg, resolve=True),
+        monitor_gym=True,
+        name=run_name,
+        resume="allow",
+    )
+    print(run)
+    cfg = wandb.config
+    config = {
+        "cfg": cfg,
+        "all_args": Namespace(**cfg.params),
+        "envs": envs,
+        "device": "cuda",
+    }
+    runner = DroneRunner(config)
+    runner.run()
         
-
 if __name__ == "__main__":
     main()

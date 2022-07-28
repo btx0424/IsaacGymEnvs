@@ -89,7 +89,7 @@ class QuadrotorBase(MultiAgentVecTask):
         self.max_episode_length = self.cfg["env"]["maxEpisodeLength"]
 
         if self.viewer:
-            cam_pos = gymapi.Vec3(-2.2, 0, 2.75)
+            cam_pos = gymapi.Vec3(-2.3, 0, 3.2)
             cam_target = gymapi.Vec3(0, 0, 0.1)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 

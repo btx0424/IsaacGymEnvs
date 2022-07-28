@@ -89,6 +89,7 @@ class TargetEasy(QuadrotorBase):
         self.reset_buf.zero_()
         self.reset_buf[target_distance > 3] = 1
         self.reset_buf[pos[..., 2] < 0.1] = 1
+        self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
 
         cum_rew = self.cum_rew_buf.clone()
@@ -156,6 +157,7 @@ class TargetHard(QuadrotorBase):
         # task specification
         self.capture_radius: float = cfg.get("captureRadius", 0.3)
         self.success_threshold: int = cfg.get("successThreshold", 50)
+        self.target_speed: float = cfg.get("targetSpeed", 1.)
         self.agents = ["predator"]
 
     def allocate_buffers(self):
@@ -222,6 +224,7 @@ class TargetHard(QuadrotorBase):
         self.reset_buf.zero_()
         self.reset_buf[(target_distance > 3).all(-1)] = 1
         self.reset_buf[pos[..., 2] < 0.1] = 1
+        self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
 
         cum_rew_buf = self.cum_rew_buf.clone()
@@ -248,11 +251,11 @@ class TargetHard(QuadrotorBase):
     def update_targets(self):
         target_pos = self.target_pos
         boundary_pos = target_pos.clone()
-        boundary_pos[..., :2] = normalize(boundary_pos[..., :2]) * 3.
+        boundary_pos[..., :2] = normalize(boundary_pos[..., :2]) * 2.5
         force_sources = torch.cat([self.quadrotor_pos, boundary_pos], dim=1)
         distance = torch.norm(target_pos - force_sources, dim=-1, keepdim=True)
         forces = (target_pos - force_sources) / (1e-7 + distance**2)
-        target_vel = normalize(torch.mean(forces, dim=-2)) * 0.5
+        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speed
         target_vel[..., 2] *= 0.
         self.target_vel = target_vel
 
@@ -401,6 +404,7 @@ class PredatorPrey(QuadrotorBase):
         self.reset_buf.zero_()
         self.reset_buf[(distance > 3).all(-1)] = 1
         self.reset_buf[self.quadrotor_pos[..., 2] < 0.1] = 1
+        self.reset_buf[self.quadrotor_pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
 
         cum_rew_buf = self.cum_rew_buf.clone()
