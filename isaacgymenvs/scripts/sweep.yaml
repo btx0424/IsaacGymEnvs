@@ -18,9 +18,9 @@ parameters:
     values: [1, 1.5, 2.0]
 
   params.num_steps:
-    values: [8, 16, 32]
+    values: [8, 32]
   params.num_mini_batch:
-    values: [8, 16, 32]
+    values: [16, 32]
   # params.ppo_epoch:
   #   values: [5, 10]
 

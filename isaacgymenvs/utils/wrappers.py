@@ -53,7 +53,7 @@ class MultiAgentRecordVideo(gym.wrappers.RecordVideo):
         
     def close_video_recorder(self) -> None:
         super().close_video_recorder()
-        self.env.enable_viewer_sync = False
+        self.env.force_render = False
     
     def start_video_recorder(self) -> None:
         self.close_video_recorder()
@@ -69,7 +69,7 @@ class MultiAgentRecordVideo(gym.wrappers.RecordVideo):
             metadata={"step_id": self.step_id, "episode_id": self.episode_id},
         )
 
-        self.env.enable_viewer_sync = True
+        self.env.force_render = True
         self.video_recorder.capture_frame()
         self.recorded_frames = 1
         self.recording = True

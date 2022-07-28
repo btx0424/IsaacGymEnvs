@@ -269,7 +269,7 @@ class TargetHard(QuadrotorBase):
             quadrotor_pos = self.quadrotor_pos[0]
             target_pos = self.target_pos[0].expand_as(quadrotor_pos)
             points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
-            self.viewer_lines.append((points, [0, 1, 0]))
+            self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
 
     def pre_physics_step(self, actions: torch.torch.Tensor):
         super().pre_physics_step(actions)
