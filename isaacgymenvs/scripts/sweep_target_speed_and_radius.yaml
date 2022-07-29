@@ -1,8 +1,8 @@
 project: QuadrotorSweep
-
+name: target_speed_and_radius
 program: train_mappo.py
 
-method: random
+method: grid
 
 metric:
   name: Episode/success/mean
@@ -15,22 +15,26 @@ parameters:
       - QuadrotorTargetHard
   
   task.targetSpeed:
-    values: [1, 1.5, 2.0]
+    values: [0.001, 0.5, 0.75, 1., 1.25, 1.5, 2.0]
+  task.targetRadius:
+    values: [2, 2.5, 3]
 
   params.num_steps:
     values: [8, 32]
   params.num_mini_batch:
     values: [16, 32]
-  # params.ppo_epoch:
-  #   values: [5, 10]
+
+  seed:
+    -31
+    -54
 
   max_env_steps:
     values:
-      - 500_000_000
+      - 100_000_000
 
-  capture_video:
-    values:
-      - True
+  # capture_video:
+  #   values:
+  #     - True
 
 command:
   - ${env}

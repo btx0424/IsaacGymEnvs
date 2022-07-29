@@ -1,0 +1,41 @@
+project: QuadrotorSweep
+name: z_speed
+program: train_mappo.py
+
+method: grid
+
+metric:
+  name: Episode/success/mean
+  goal: maximize
+
+parameters:
+  task: 
+    values:
+      # - QuadrotorTargetEasy
+      - QuadrotorTargetHard
+  
+  task.noZSpeed:
+    values: [True, False]
+
+  params.num_steps:
+    values: [8, 32]
+  params.num_mini_batch:
+    values: [16, 32]
+
+  seed:
+    -31
+    -54
+
+  max_env_steps:
+    values:
+      - 100_000_000
+
+  # capture_video:
+  #   values:
+  #     - True
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

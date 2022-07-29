@@ -43,23 +43,9 @@ class QuadrotorBase(MultiAgentVecTask):
         self.cfg = cfg
         
         self.actor_types = ["drone", "box", "sphere"]
-        _walls = torch.tensor([
-            [-1, 0, 0.3, 0.05, 2., .6],
-            [0, -1, 0.3, 2., 0.05, .6],
-            [1, 0, 0.3, 0.05, 2., .6],
-            [0, 1, 0.3, 2., 0.05, .6]], device=rl_device) * 3
-        _obstacles = torch.tensor([
-            [1, 1, 0.3, 0.1, 0.1, 0.6],
-            [-1, -1, 0.3, 0.1, 0.1, 0.6]], device=rl_device)
-        self.boxes = []
-        self.boxes.append(_walls)
-        self.boxes.append(_obstacles)
-        self.box_states = torch.cat(self.boxes, dim=0)
-
-        self.num_boxes = len(self.box_states)
         self.num_targets = cfg["env"].get("numTargets", 2)
 
-        self.max_linear_velocity = cfg["env"].get("maxLinearVelocity", 2)
+        self.max_linear_velocity = cfg["env"].get("maxLinearVelocity", 4)
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
@@ -101,6 +87,7 @@ class QuadrotorBase(MultiAgentVecTask):
         self.create_obs_space_and_processor(self.obs_type)
 
     def create_sim(self):
+        # create sim
         self.sim_params.up_axis = gymapi.UP_AXIS_Z
         self.sim_params.gravity.x = 0
         self.sim_params.gravity.y = 0
@@ -109,6 +96,29 @@ class QuadrotorBase(MultiAgentVecTask):
         self.sim = self.gym.create_sim(
             self.device_id, self.graphics_device_id, self.physics_engine, self.sim_params)
         assert self.sim is not None
+        
+        # boundary boxes
+        spacing = self.cfg["env"]["envSpacing"]
+        self.MAX_XYZ = torch.tensor([spacing, spacing, 2], device=self.device)
+        self.MIN_XYZ = torch.tensor([-spacing, -spacing, 0], device=self.device)
+        _wall_length = 2 * spacing
+        _wall_height = self.MAX_XYZ[2]
+        _walls = torch.tensor([
+            [-spacing, 0, 0.5, 0.05, _wall_length, _wall_height],
+            [0, -spacing, 0.5, _wall_length, 0.05, _wall_height],
+            [spacing, 0, 0.5, 0.05, _wall_length, _wall_height],
+            [0, spacing, 0.5, _wall_length, 0.05, _wall_height]], device=self.device)
+        _obstacles = torch.tensor([
+            [1, 1, 0.3, 0.25, 0.25, _wall_height],
+            [-1, -1, 0.3, 0.25, 0.25, _wall_height]], device=self.device)
+
+        self.boxes = []
+        self.boxes.append(_walls)
+        self.boxes.append(_obstacles)
+        self.box_states = torch.cat(self.boxes, dim=0)
+        self.num_boxes = len(self.box_states)
+        
+        # load assets
         asset_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../../assets')
         asset_file = "urdf/quadrotor/cf2x.urdf"
         asset_urdf_tree = ElementTree.parse(os.path.join(asset_root, asset_file)).getroot()
@@ -139,7 +149,6 @@ class QuadrotorBase(MultiAgentVecTask):
         self.gym.add_ground(self.sim, plane_params)
 
         self.envs = []
-        spacing = self.cfg["env"]["envSpacing"]
         lower = gymapi.Vec3(-spacing, -spacing, 0.0)
         upper = gymapi.Vec3(spacing, spacing, spacing)
         num_per_row = int(math.sqrt(self.num_envs))
@@ -151,9 +160,6 @@ class QuadrotorBase(MultiAgentVecTask):
         env_actor_index = defaultdict(lambda:[])
         env_body_index = defaultdict(lambda:[])
         sim_actor_index = defaultdict(lambda:[])
-
-        self.MAX_XYZ = torch.tensor([spacing, spacing, 1], device=self.device)
-        self.MIN_XYZ = torch.tensor([-spacing, -spacing, 0], device=self.device)
 
         cell_size = 0.4
         grid_shape = ((self.MAX_XYZ - self.MIN_XYZ) / cell_size).int()
@@ -194,12 +200,12 @@ class QuadrotorBase(MultiAgentVecTask):
                 box_pose.p = gymapi.Vec3(*center)
                 box_handle = self.gym.create_actor(env, box_asset, box_pose, f"box_{i_box}", i_env, 0) 
                 
-                min_corner = torch.floor((center-half_ext-self.MIN_XYZ) / cell_size)
-                max_corner = torch.ceil((center+half_ext-self.MIN_XYZ) / cell_size)
-                mask = (centers > min_corner).all(1) & (centers < max_corner).all(1)
-                avail[mask] = False
-                
                 if i_env == 0:
+                    min_corner = torch.floor((center-half_ext-self.MIN_XYZ) / cell_size)
+                    max_corner = torch.ceil((center+half_ext-self.MIN_XYZ) / cell_size)
+                    mask = (centers > min_corner).all(1) & (centers < max_corner).all(1)
+                    avail[mask] = False
+
                     env_actor_index["box"].append(
                         self.gym.get_actor_index(env, box_handle, gymapi.DOMAIN_ENV))
                 sim_actor_index["box"].append(self.gym.get_actor_index(env, box_handle, gymapi.DOMAIN_SIM))
