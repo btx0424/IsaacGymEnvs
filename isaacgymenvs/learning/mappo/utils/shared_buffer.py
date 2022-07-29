@@ -4,7 +4,7 @@ import numpy as np
 import gym
 from collections import defaultdict
 
-from onpolicy.utils.util import check, get_shape_from_obs_space, get_shape_from_act_space
+from ..utils.util import check, get_shape_from_obs_space, get_shape_from_act_space
 from gym import spaces
 
 

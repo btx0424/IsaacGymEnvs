@@ -1,20 +1,16 @@
     
 from dataclasses import dataclass
-import time
+import logging
 from typing import Dict
 from isaacgymenvs.learning.mappo.algorithms.rmappo import MAPPOPolicy
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 import wandb
 import os
 import numpy as np
-from itertools import chain
 import torch
-from tensorboardX import SummaryWriter
 from isaacgymenvs.learning.mappo.utils.shared_buffer import SharedReplayBuffer
 
-import socket
 import psutil
-import slackweb
 from torchvision.utils import make_grid
 webhook_url = " https://hooks.slack.com/services/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"
 class Runner(object):
@@ -130,6 +126,4 @@ class Runner(object):
         total_mem = float(mem.total) / 1024 / 1024 / 1024
         used_mem = float(mem.used) / 1024 / 1024 / 1024
         if used_mem/total_mem > 0.95:
-            slack = slackweb.Slack(url=webhook_url)
-            host_name = socket.gethostname()
-            slack.notify(text="Host {}: occupied memory is *{:.2f}*%!".format(host_name, used_mem/total_mem*100))
+            logging.warning("Memory shortage.")
