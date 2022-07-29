@@ -751,6 +751,11 @@ class VecTask(Env):
         self.first_randomization = False
 
 class MultiAgentVecTask(VecTask):
+
+    # gym version compatibility ...
+    metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 24}
+    render_mode = "rgb_array"
+    
     def __init__(self, config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         self.num_rewards = config["env"].get("numRewards", 1)
         

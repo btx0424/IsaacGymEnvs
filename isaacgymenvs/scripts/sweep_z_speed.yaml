@@ -23,8 +23,7 @@ parameters:
     values: [16, 32]
 
   seed:
-    -31
-    -54
+    values: [31, 54]
 
   max_env_steps:
     values:
