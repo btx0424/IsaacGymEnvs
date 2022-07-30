@@ -1,6 +1,5 @@
 import gym
 import os
-from gym.wrappers.monitoring import video_recorder
 
 class MultiAgentRecordVideo(gym.wrappers.RecordVideo):
 
