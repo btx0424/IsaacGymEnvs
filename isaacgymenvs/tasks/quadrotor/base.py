@@ -46,7 +46,7 @@ class QuadrotorBase(MultiAgentVecTask):
         self.num_targets = cfg["env"].get("numTargets", 2)
 
         self.max_linear_velocity = cfg["env"].get("maxLinearVelocity", 4)
-
+        
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
 
         self.root_tensor = self.gym.acquire_actor_root_state_tensor(self.sim) 

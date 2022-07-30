@@ -151,6 +151,8 @@ class TargetHard(QuadrotorBase):
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         cfg["env"]["numRewards"] = 3 # [distance, collision, capture]
+        self.spawn_location = cfg.get("spawnLocation", "fixed")
+        assert self.spawn_location in ["fixed", "random"]
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         # task specification
@@ -294,8 +296,9 @@ class TargetHard(QuadrotorBase):
         env_velocities = self.root_linvels[env_ids]
 
         # reset drones
-        grid_idx = np.random.choice(self.grid_avail, self.num_agents, replace=False) 
-        env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[grid_idx] # (*, num_agents, 3)
+        if self.spawn_location == "random":
+            grid_idx = np.random.choice(self.grid_avail, self.num_agents, replace=False) 
+            env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[grid_idx] # (*, num_agents, 3)
 
         # reset targets
         spacing = torch.linspace(0, self.max_episode_length, self.num_targets+1, device=self.device)[:-1]

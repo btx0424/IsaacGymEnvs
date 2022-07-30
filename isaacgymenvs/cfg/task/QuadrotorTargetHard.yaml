@@ -21,6 +21,8 @@ env:
   actType: pid_vel
   numTargets: 1
 
+  maxLinearVelocity: 4
+  
 sim:
   dt: 0.01
   substeps: 1
@@ -44,4 +46,4 @@ sim:
     
 targetSpeed: 1
 boundaryRadius: 2.5
-noZSpeed: False
+spawnLocation: 'fixed'

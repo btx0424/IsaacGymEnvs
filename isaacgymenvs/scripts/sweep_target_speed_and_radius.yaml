@@ -11,26 +11,28 @@ metric:
 parameters:
   task: 
     values:
-      # - QuadrotorTargetEasy
       - QuadrotorTargetHard
   
   task.targetSpeed:
-    values: [0.001, 0.5, 0.75, 1., 1.25, 1.5, 2.0]
-  task.targetRadius:
-    values: [2, 2.5, 3]
+    values: [0., 0.5, 1., 1.5, 2.0]
+  task.boundaryRadius:
+    values: [2, 3]
+  task.spawnLocation:
+    values: ['fixed', 'random']
+  task.env.maxLinearVelocity:
+    values: [2, 3, 4]
 
-  params.num_steps:
-    values: [8, 32]
-  params.num_mini_batch:
-    values: [16, 32]
+  # params.num_steps:
+  #   values: [8, 64]
+  # params.num_mini_batch:
+  #   values: [16, 32]
 
-  seed:
-    -31
-    -54
+  # seed:
+  #   values: [31, 54]
 
-  max_env_steps:
-    values:
-      - 100_000_000
+  # max_env_steps:
+  #   values:
+  #     - 250_000_000
 
   # capture_video:
   #   values:
