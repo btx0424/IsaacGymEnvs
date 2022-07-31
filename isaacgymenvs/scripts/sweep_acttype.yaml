@@ -1,5 +1,5 @@
 project: QuadrotorSweep
-name: spawn_location_and_speed
+name: act_type
 program: train_mappo.py
 
 method: grid
@@ -13,10 +13,12 @@ parameters:
     values:
       - QuadrotorTargetHard
   
+  task.env.actType:
+    values: ["pid_pos", "pid_vel", "multi_discrete"]
   task.targetSpeed:
     values: [1, 1.5, 2]
-  # task.boundaryRadius:
-  #   values: [2, 3]
+  task.boundaryRadius:
+    values: [3]
   task.spawnLocation:
     values: ["random"] # ['fixed', 'random']
   task.env.maxLinearVelocity:

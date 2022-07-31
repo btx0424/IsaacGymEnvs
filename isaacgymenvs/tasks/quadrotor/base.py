@@ -82,6 +82,7 @@ class QuadrotorBase(MultiAgentVecTask):
         self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
         
         self.act_type = cfg["env"].get("actType", "pid_vel")
+        assert self.act_type in ["pid_vel", "pid_pos", "multi_discrete"]
         self.obs_type = cfg["env"].get("obsType", "root_state")
         self.create_act_space_and_processor(self.act_type)
         self.create_obs_space_and_processor(self.obs_type)
@@ -354,7 +355,7 @@ class QuadrotorBase(MultiAgentVecTask):
         raise NotImplementedError
 
     def create_act_space_and_processor(self, act_type) -> None:
-        if act_type == "pid_waypoint":
+        if act_type == "pid_pos":
             ones = np.ones(3)
             self.act_space = spaces.Box(-ones, ones)
             def act_processor(actions: Tensor) -> Tensor:

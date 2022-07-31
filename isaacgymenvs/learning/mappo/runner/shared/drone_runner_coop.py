@@ -1,5 +1,6 @@
 from collections import defaultdict
 from dataclasses import dataclass
+import logging
 import time
 from typing import Any, Dict, Tuple, Union
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
@@ -8,6 +9,7 @@ from isaacgymenvs.tasks.quadrotor.base import TensorDict
 import numpy as np
 import torch
 import wandb
+import os
 from .base_runner import Runner
 
 from isaacgymenvs.learning.mappo.algorithms.rmappo import MAPPOPolicy
@@ -35,6 +37,8 @@ class PPOConfig:
 
 class DroneRunner(Runner):
     def __init__(self, config):
+        self.config = config
+
         cfg: RunnerConfig = config["cfg"]
         self.max_iterations = cfg.max_iterations
         self.max_env_steps = cfg.max_env_steps
@@ -107,6 +111,8 @@ class DroneRunner(Runner):
         start = time.perf_counter()
 
         episode_infos = defaultdict(lambda: [])
+        metric = "Episode/success/mean"
+        metric_best = 0
 
         for iteration in range(self.max_iterations):
 
@@ -171,9 +177,9 @@ class DroneRunner(Runner):
 
                 # record statistics
                 if env_dones.any():
-                    episode_info: Dict = infos.get("episode", {})
+                    episode_info: Dict[str, torch.Tensor] = infos.get("episode", {})
                     for k, v in episode_info.items():
-                        episode_infos[k].append(v[env_dones])
+                        episode_infos[k].extend(v[env_dones].tolist())
                     self.total_episodes += env_dones.sum()
 
                 self.inf_step_time += _inf_end - _step_start
@@ -205,6 +211,11 @@ class DroneRunner(Runner):
                 train_infos["episode"] = self.total_episodes
                 train_infos["iteration"] = iteration
                 self.log(train_infos)
+
+                if train_infos.get(metric, metric_best) > metric_best:
+                    metric_best = train_infos[metric]
+                    logging.info(f"Saving best model with {metric}: {metric_best}")
+                    self.save()
 
             if self.total_env_steps > self.max_env_steps:
                 break
@@ -254,3 +265,25 @@ class DroneRunner(Runner):
 
     def log(self, info: Dict[str, Any]):
         wandb.log({f"{k}": v for k, v in info.items()})
+
+    def save(self):
+        logging.info(f"Saving models to {wandb.run.dir}")
+        checkpoint = {}
+        for agent, policy in self.policies.items():
+            checkpoint[agent] = {
+                "actor": policy.actor.state_dict(),
+                "critic": policy.critic.state_dict(),
+            }
+        checkpoint["episodes"] = self.total_episodes
+        checkpoint["env_steps"] = self.total_env_steps
+        torch.save(checkpoint, os.path.join(wandb.run.dir, "checkpoint.pt"))
+
+    def restore(self):
+        logging.info(f"Restoring models from {wandb.run.dir}")
+        checkpoint = torch.load(os.path.join(wandb.run.dir, "checkpoint.pt"))
+        for agent, policy in self.policies.items():
+            policy.actor.load_state_dict(checkpoint[agent]["actor"])
+            policy.critic.load_state_dict(checkpoint[agent]["critic"])
+        self.total_episodes = checkpoint["episodes"]
+        self.total_env_steps = checkpoint["env_steps"]
+        
