@@ -1,0 +1,50 @@
+project: QuadrotorSweep
+name: act_type
+program: train_mappo.py
+
+method: grid
+
+metric:
+  name: Episode/success/mean
+  goal: maximize
+
+parameters:
+  task: 
+    values:
+      - QuadrotorTargetHard
+  
+  task.targetSpeed:
+    values: [1, 2]
+  task.boundaryRadius:
+    values: [3]
+  task.spawnLocation:
+    values: ["random"] # ['fixed', 'random']
+  task.env.maxLinearVelocity:
+    values: [3] # [2, 3, 4]
+
+  # params.use_naive_recurrent_policy:
+  #   values: [True, False]
+  params.use_attn:
+    values: [True, False]
+
+  params.num_steps:
+    values: [8, 32]
+  # params.num_mini_batch:
+  #   values: [16, 32]
+
+  # seed:
+  #   values: [31, 54]
+
+  # max_env_steps:
+  #   values:
+  #     - 250_000_000
+
+  # capture_video:
+  #   values:
+  #     - True
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

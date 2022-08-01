@@ -177,7 +177,7 @@ class TargetHard(QuadrotorBase):
         self.captured_steps_buf[env_ids] = 0
         
     def create_obs_space_and_processor(self, obs_type=None) -> None:
-        num_obs = 13*self.num_agents + 13 + 13
+        num_obs = 6*self.num_boxes + 13*self.num_agents + 13 + 13
         ones = np.ones(num_obs)
         self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
         def obs_processor(obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
@@ -193,12 +193,16 @@ class TargetHard(QuadrotorBase):
             states_all[..., :3] = states_all[..., :3] - states_self[..., :3].unsqueeze(2) # (env, agent, agent, 3) - (env, agent, 1, 3)
             states_all = states_all.reshape(self.num_envs, self.num_agents, -1)
 
+            states_box = self.box_states.repeat(self.num_envs, self.num_agents, 1, 1)
+            states_box[..., :3] = states_box[..., :3] - states_self[..., :3].unsqueeze(2)
+            states_box = states_box.reshape(self.num_envs, self.num_agents, -1)
+            obs_tensor.append(states_box)
             obs_tensor.append(states_target)
             obs_tensor.append(states_all)
             obs_tensor.append(states_self)
             obs_dict["state"] = obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
             return obs_dict
-        self.obs_split = [(1, 13), (self.num_agents, 13), (1, 13)]
+        self.obs_split = [(self.num_boxes, 6), (1, 13), (self.num_agents, 13), (1, 13)]
         self.obs_processor = obs_processor
         self.state_space = self.obs_space
     
