@@ -14,18 +14,18 @@ parameters:
       - QuadrotorTargetHard
   
   task.env.actType:
-    values: ["pid_pos", "pid_vel", "multi_discrete"]
+    values: ["pid_vel", "multi_discrete"]
   task.targetSpeed:
-    values: [1, 1.5, 2]
+    values: [1, 2]
   task.boundaryRadius:
-    values: [3]
+    values: [2, 3]
   task.spawnLocation:
     values: ["random"] # ['fixed', 'random']
   task.env.maxLinearVelocity:
     values: [3] # [2, 3, 4]
 
   # params.num_steps:
-  #   values: [8, 64]
+  #   values: [8, 32]
   # params.num_mini_batch:
   #   values: [16, 32]
 

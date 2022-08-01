@@ -395,6 +395,7 @@ class QuadrotorBase(MultiAgentVecTask):
             self.act_processor = act_processor
         elif act_type == "multi_discrete":
             self.act_space = spaces.Tuple([spaces.Discrete(3)] * 3)
+            self.act_space = spaces.MultiDiscrete([3, 3, 3])
             def act_processor(actions: Tensor) -> Tensor:
                 pos, quat, vel, angvel = self.quadrotor_states.flatten(end_dim=-2)
                 target_vel = (actions.reshape(-1, 3) - 1)

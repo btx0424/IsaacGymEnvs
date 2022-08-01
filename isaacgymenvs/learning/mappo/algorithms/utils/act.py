@@ -6,7 +6,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from gym.spaces import Box, Discrete, MultiDiscrete
+from gym import spaces
 
 class ACTLayer(nn.Module):
     def __init__(self, action_space, inputs_dim, use_orthogonal, gain, **kwargs):
@@ -15,28 +15,24 @@ class ACTLayer(nn.Module):
         self.continuous_action = False
         self.mixed_action = False
 
-        if isinstance(action_space, Discrete):
+        if isinstance(action_space, spaces.Discrete):
             action_dim = action_space.n
             self.action_out = Categorical(inputs_dim, action_dim, use_orthogonal, gain)
-        elif isinstance(action_space, Box):
+        elif isinstance(action_space, spaces.Box):
             self.continuous_action = True
             action_dim = action_space.shape[0]
             self.action_out = DiagGaussian(inputs_dim, action_dim, use_orthogonal, gain, tanh=kwargs["tanh_normal"], sde=kwargs["sde"])
         elif action_space.__class__.__name__ == "MultiBinary":
             action_dim = action_space.shape[0]
             self.action_out = Bernoulli(inputs_dim, action_dim, use_orthogonal, gain)
-        elif isinstance(action_space, MultiDiscrete):
+        elif isinstance(action_space, spaces.MultiDiscrete):
             self.multidiscrete_action = True
             self.action_outs = []
             for action_dim in action_space.nvec:
                 self.action_outs.append(Categorical(inputs_dim, action_dim, use_orthogonal, gain))
             self.action_outs = nn.ModuleList(self.action_outs)
-        else:  # discrete + continous
-            self.mixed_action = True
-            continous_dim = action_space[0].shape[0]
-            discrete_dim = action_space[1].n
-            self.action_outs = nn.ModuleList([DiagGaussian(inputs_dim, continous_dim, use_orthogonal, gain), Categorical(
-                inputs_dim, discrete_dim, use_orthogonal, gain)])
+        else:  
+            raise TypeError(action_space)
     
     def forward(self, x, available_actions=None, deterministic=False):
         if self.mixed_action :

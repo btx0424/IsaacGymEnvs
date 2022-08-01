@@ -123,6 +123,7 @@ class DroneRunner(Runner):
                 # Sample actions
                 _step_start = time.perf_counter()
 
+                # tensors by agent
                 action_dict = TensorDict()
                 action_log_prob_dict = TensorDict()
                 value_dict = TensorDict()
@@ -200,7 +201,7 @@ class DroneRunner(Runner):
                     f"runtime: {self.env_step_time:.2f} (env), {self.inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total), fps: {self.total_env_steps/(end-start):.2f}")
 
                 for k, v in episode_infos.items():
-                    v = torch.cat(v).cpu().numpy().mean(0)
+                    v = np.array(v).mean(0)
                     train_infos[f"Episode/{k}"] = wandb.Histogram(v)
                     train_infos[f"Episode/{k}/mean"] = v.mean()
                     print(f"Episode/{k}: {v}")

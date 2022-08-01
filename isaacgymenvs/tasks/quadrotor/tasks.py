@@ -158,7 +158,8 @@ class TargetHard(QuadrotorBase):
         # task specification
         self.capture_radius: float = cfg.get("captureRadius", 0.3)
         self.success_threshold: int = cfg.get("successThreshold", 50)
-        self.target_speed: float = cfg.get("targetSpeed", 1.)
+        self.target_speeds = torch.ones((self.num_envs, self.num_targets, 1), device=self.device)
+        self.target_speeds *= cfg.get("targetSpeed", 1.)
         self.no_z_speed = cfg.get("noZSpeed", False)
         self.boundary_radius  = cfg.get("boundaryRadius", 2.5)
         assert self.boundary_radius > 1
@@ -266,7 +267,7 @@ class TargetHard(QuadrotorBase):
         d = target_pos.view(self.num_envs, self.num_targets, 1, 3) - force_sources
         distance = torch.norm(d, dim=-1, keepdim=True)
         forces = d / (1e-7 + distance**2)
-        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speed
+        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds
         
         if self.no_z_speed:
             target_vel[..., 2] *= 0.

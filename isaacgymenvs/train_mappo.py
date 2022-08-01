@@ -63,7 +63,7 @@ def main(cfg):
         "envs": envs,
     }
     runner = DroneRunner(config)
-    if run.resumed:
+    if cfg.resume_id and run.resumed:
         logging.info(f"Resuming run {run.id}")
         wandb.restore("checkpoint.pt")
         runner.restore()

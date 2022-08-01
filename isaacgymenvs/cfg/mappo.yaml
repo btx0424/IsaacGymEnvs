@@ -17,7 +17,7 @@ torch_deterministic: False
 
 # set the maximum number of learning iterations to train for. overrides default per-environment setting
 max_iterations: 2000
-max_env_steps: 250_000_000
+max_env_steps: 150_000_000
 
 ## Device config
 #  'physx' or 'flex'
@@ -131,10 +131,10 @@ wandb_name: ${task.name}
 wandb_entity: ''
 wandb_project: 'isaacgymenvs'
 resume_id: 
-capture_video: True
+capture_video: False
 capture_video_freq: 4
 capture_video_len: ${task.env.maxEpisodeLength}
-force_render: True
+force_render: False
 
 # disables rendering
 headless: False
