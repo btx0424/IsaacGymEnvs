@@ -3,7 +3,7 @@ import math
 import numpy as np
 from isaacgym import gymtorch
 from gym import spaces
-from typing import Any, Dict, Tuple
+from typing import Any, Callable, Dict, Tuple
 from .base import QuadrotorBase, TensorDict
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
@@ -151,8 +151,6 @@ class TargetHard(QuadrotorBase):
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         cfg["env"]["numRewards"] = 3 # [distance, collision, capture]
-        self.spawn_location = cfg.get("spawnLocation", "fixed")
-        assert self.spawn_location in ["fixed", "random"]
 
         super().__init__(cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         # task specification
@@ -160,9 +158,25 @@ class TargetHard(QuadrotorBase):
         self.success_threshold: int = cfg.get("successThreshold", 50)
         self.target_speeds = torch.ones((self.num_envs, self.num_targets, 1), device=self.device)
         self.target_speeds *= cfg.get("targetSpeed", 1.)
-        self.no_z_speed = cfg.get("noZSpeed", False)
         self.boundary_radius  = cfg.get("boundaryRadius", 2.5)
         assert self.boundary_radius > 1
+
+        def reset_targets(env_states):
+            env_positions = env_states[..., :3]
+            env_velocities = env_states[..., 7:10]
+            spacing = torch.linspace(0, self.max_episode_length, self.num_targets+1, device=self.device)[:-1]
+            rad = spacing / self.max_episode_length * math.pi*2
+            env_positions[:, self.env_actor_index["target"], 0] = torch.sin(rad)
+            env_positions[:, self.env_actor_index["target"], 1] = torch.cos(rad)
+            env_positions[:, self.env_actor_index["target"], 2] = 0.5
+            env_velocities[:, self.env_actor_index["target"]] = 0
+        
+        def reset_quadrotors(env_states):
+            env_positions = env_states[..., :3]
+            grid_idx = np.random.choice(self.grid_avail, self.num_agents, replace=False)
+            env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[grid_idx]
+
+        self.reset_callbacks = [reset_targets, reset_quadrotors]
 
     def allocate_buffers(self):
         super().allocate_buffers()
@@ -237,9 +251,9 @@ class TargetHard(QuadrotorBase):
 
         cum_rew_buf = self.cum_rew_buf.clone()
         self.extras["episode"].update({
-            "reward/distance": cum_rew_buf[..., 0],
-            "reward/collision": cum_rew_buf[..., 1],
-            "reward/capture": cum_rew_buf[..., 2],
+            "reward_distance": cum_rew_buf[..., 0],
+            "reward_collision": cum_rew_buf[..., 1],
+            "reward_capture": cum_rew_buf[..., 2],
             
             "success": (self.captured_steps_buf > self.success_threshold).float(),
         })
@@ -260,7 +274,10 @@ class TargetHard(QuadrotorBase):
     def target_vel(self, vel: torch.Tensor):
         self.root_linvels[:, self.env_actor_index["target"]] = vel
 
-    def update_targets(self):
+    def pre_physics_step(self, actions: torch.torch.Tensor):
+        super().pre_physics_step(actions)
+        
+        # update targets
         target_pos = self.target_pos # (num_envs, num_targets, 3)
         boundary_pos = target_pos.clone().view(self.num_envs, self.num_targets, 1, 3)
         boundary_pos[..., :2] = normalize(boundary_pos[..., :2]) * self.boundary_radius
@@ -273,8 +290,6 @@ class TargetHard(QuadrotorBase):
         forces = d / (1e-7 + distance**2)
         target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds
         
-        if self.no_z_speed:
-            target_vel[..., 2] *= 0.
         target_pos[..., 2].clamp_(0.2, self.MAX_XYZ[2]-0.2)
         self.target_pos = target_pos # necessary?
         self.target_vel = target_vel
@@ -291,40 +306,23 @@ class TargetHard(QuadrotorBase):
             points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
             self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
 
-    def pre_physics_step(self, actions: torch.torch.Tensor):
-        super().pre_physics_step(actions)
-        self.update_targets()
-    
     def reset_actors(self, env_ids):
         super().reset_actors(env_ids)
-        env_positions = self.root_positions[env_ids]
-        env_velocities = self.root_linvels[env_ids]
-
-        # reset drones
-        if self.spawn_location == "random":
-            grid_idx = np.random.choice(self.grid_avail, self.num_agents, replace=False) 
-            env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[grid_idx] # (*, num_agents, 3)
-
-        # reset targets
-        spacing = torch.linspace(0, self.max_episode_length, self.num_targets+1, device=self.device)[:-1]
-        rad = spacing / self.max_episode_length * math.pi*2
-        env_positions[:, self.env_actor_index["target"], 0] = torch.sin(rad)
-        env_positions[:, self.env_actor_index["target"], 1] = torch.cos(rad)
-        env_positions[:, self.env_actor_index["target"], 2] = 0.5
-        env_velocities[:, self.env_actor_index["target"]] = 0
-        
-        # rewrite root tensor
-        self.root_positions[env_ids] = env_positions
-        self.root_linvels[env_ids] = env_velocities
+        env_states = self.root_states[env_ids].contiguous()
+        for callback in self.reset_callbacks:
+            callback(env_states)
+        self.root_states[env_ids] = env_states
+        self.extras["init_states"][env_ids] = self.root_states[env_ids]
     
     def agents_step(self, action_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
         obs_dict, reward, done, info = self.step(action_dict["predator"])
         return {"predator": (obs_dict, reward, done)}, info
     
     def reset(self) -> Dict[str, torch.Tensor]:
+        self.extras["init_states"] = self.root_states.clone()
         obs_dict = super().reset()
         return {"predator": obs_dict}
-
+    
 class PredatorPrey(QuadrotorBase):
 
     agents = ["predator", "prey"]

@@ -4,11 +4,12 @@ task_name: ${task.name}
 # experiment name. defaults to name of training config
 experiment: ''
 
-# if set to positive integer, overrides the default number of environments
+# runner 
 num_envs: 16384
 num_eval_envs: 4
 num_agents: ${task.env.numAgents}
 log_interval: 5
+use_cl: true
 
 # seed - set to -1 to choose random seed
 seed: 42
@@ -119,10 +120,7 @@ params:
   use_states_clip: false
   use_value_active_masks: true
   use_valuenorm: true
-  use_wandb: true
-  user_name: zoeyuchao
   value_loss_coef: 1
-  wandb_name: zoeyuchao
   weight_decay: 0
 
 wandb_activate: True

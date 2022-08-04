@@ -33,6 +33,7 @@ def main(cfg):
     OmegaConf.set_struct(cfg, False)
     time_str = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M")
     run_name = f"{cfg.wandb_name}/mappo_{time_str}"
+    if cfg.capture_video: cfg.headless = False
     setproctitle.setproctitle(run_name)
 
     run_id = cfg.resume_id or wandb.util.generate_id()
