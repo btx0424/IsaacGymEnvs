@@ -1,5 +1,5 @@
 project: QuadrotorSweep
-name: act_type
+name: seed
 program: train_mappo.py
 
 method: grid
@@ -17,29 +17,31 @@ parameters:
     values: ["pid_vel", "multi_discrete"]
   task.targetSpeed:
     values: [1, 2]
-  task.boundaryRadius:
-    values: [2, 3]
   task.spawnLocation:
-    values: ["random"] # ['fixed', 'random']
+    values: ['random']
   task.env.maxLinearVelocity:
-    values: [3] # [2, 3, 4]
+    values: [2] # [2, 3, 4]
 
   # params.num_steps:
   #   values: [8, 32]
   # params.num_mini_batch:
   #   values: [16, 32]
 
-  # seed:
-  #   values: [31, 54]
+  seed:
+    values: [12, 34, 56]
 
   # max_env_steps:
   #   values:
   #     - 250_000_000
 
-  # capture_video:
-  #   values:
-  #     - True
+  capture_video:
+    values:
+      - True
 
+  log_interval:
+    values:
+      - 10
+      
 command:
   - ${env}
   - python

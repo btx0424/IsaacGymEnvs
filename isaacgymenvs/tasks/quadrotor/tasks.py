@@ -275,7 +275,7 @@ class TargetHard(QuadrotorBase):
         
         if self.no_z_speed:
             target_vel[..., 2] *= 0.
-        target_pos[..., 2].clamp_(0.1, self.MAX_XYZ[2])
+        target_pos[..., 2].clamp_(0.2, self.MAX_XYZ[2]-0.2)
         self.target_pos = target_pos # necessary?
         self.target_vel = target_vel
 

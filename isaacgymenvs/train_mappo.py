@@ -1,5 +1,6 @@
 from argparse import Namespace
 import logging
+from pprint import pprint
 import gym
 import hydra
 import isaacgym

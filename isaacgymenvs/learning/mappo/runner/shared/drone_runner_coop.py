@@ -89,7 +89,9 @@ class DroneRunner(Runner):
         self.inf_step_time = 0
         
         self.total_env_steps = 0
+        self.env_steps_this_run = 0
         self.total_episodes = 0
+        self.episodes_this_run = 0
 
     def run(self):
         obs_dict = self.envs.reset()
@@ -112,7 +114,10 @@ class DroneRunner(Runner):
 
         episode_infos = defaultdict(lambda: [])
         metric = "Episode/success/mean"
-        metric_best = 0
+        if "best_" + metric not in wandb.run.summary.keys():
+            wandb.run.summary["best_" + metric] = 0.0
+
+        _last_log = time.perf_counter()
 
         for iteration in range(self.max_iterations):
 
@@ -191,19 +196,24 @@ class DroneRunner(Runner):
             train_infos = self.train()
 
             self.total_env_steps += self.num_steps * self.num_envs
+            self.env_steps_this_run += self.num_steps * self.num_envs
 
             # log information
             if iteration % self.log_interval == 0:
-                end = time.perf_counter()
-                print(
-                    f"iteration: {iteration}/{self.max_iterations}, env steps: {self.total_env_steps}, episodes: {self.total_episodes}")
-                print(
-                    f"runtime: {self.env_step_time:.2f} (env), {self.inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total), fps: {self.total_env_steps/(end-start):.2f}")
+                fps = (self.num_steps * self.num_envs * self.log_interval) / (time.perf_counter() - _last_log)
+                progress_str = f"iteration: {iteration}/{self.max_iterations}, env steps: {self.total_env_steps}, episodes: {self.total_episodes}"
+                performance_str = f"runtime: {self.env_step_time:.2f} (env), {self.inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total), fps: {fps:.2f}"
+                
+                print(progress_str)
+                print(performance_str)
 
                 for k, v in episode_infos.items():
                     v = np.array(v).mean(0)
-                    train_infos[f"Episode/{k}"] = wandb.Histogram(v)
-                    train_infos[f"Episode/{k}/mean"] = v.mean()
+                    if type(v) is float:
+                        train_infos[f"Episode/{k}"] = v
+                    else:
+                        train_infos[f"Episode/{k}"] = wandb.Histogram(v)
+                        train_infos[f"Episode/{k}/mean"] = v.mean()
                     print(f"Episode/{k}: {v}")
 
                 episode_infos.clear()
@@ -213,12 +223,17 @@ class DroneRunner(Runner):
                 train_infos["iteration"] = iteration
                 self.log(train_infos)
 
-                if train_infos.get(metric, metric_best) > metric_best:
-                    metric_best = train_infos[metric]
-                    logging.info(f"Saving best model with {metric}: {metric_best}")
+                if train_infos.get(metric, wandb.run.summary["best_" + metric]) > wandb.run.summary["best_" + metric]:
+                    wandb.run.summary["best_" + metric] = train_infos.get(metric)
+                    logging.info(f"Saving best model with {metric}: {wandb.run.summary['best_' + metric]}")
                     self.save()
+                
+                _last_log = time.perf_counter()
 
-            if self.total_env_steps > self.max_env_steps:
+            if self.env_steps_this_run > self.max_env_steps:
+                wandb.run.summary["env_step"] = self.total_env_steps
+                wandb.run.summary["episode"] = self.total_episodes
+                wandb.run.summary["iteration"] = iteration
                 break
 
     def insert(self, data, buffer: SharedReplayBuffer = None):
