@@ -161,7 +161,7 @@ class TargetHard(QuadrotorBase):
         self.boundary_radius  = cfg.get("boundaryRadius", 2.5)
         assert self.boundary_radius > 1
 
-        def reset_targets(env_states):
+        def reset_targets(env_ids, env_states):
             env_positions = env_states[..., :3]
             env_velocities = env_states[..., 7:10]
             spacing = torch.linspace(0, self.max_episode_length, self.num_targets+1, device=self.device)[:-1]
@@ -171,10 +171,13 @@ class TargetHard(QuadrotorBase):
             env_positions[:, self.env_actor_index["target"], 2] = 0.5
             env_velocities[:, self.env_actor_index["target"]] = 0
         
-        def reset_quadrotors(env_states):
+        def reset_quadrotors(env_ids, env_states):
             env_positions = env_states[..., :3]
-            grid_idx = np.random.choice(self.grid_avail, self.num_agents, replace=False)
-            env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[grid_idx]
+            randperm = torch.randperm(len(self.grid_avail), device=self.device)
+            num_samples = len(env_positions)*self.num_agents
+            sample_idx = randperm[torch.arange(num_samples).reshape(len(env_positions), self.num_agents)%len(self.grid_avail)]
+            self.extras["task_codes"][env_ids] = sample_idx
+            env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
 
         self.reset_callbacks = [reset_targets, reset_quadrotors]
 
@@ -244,7 +247,7 @@ class TargetHard(QuadrotorBase):
         self.cum_rew_buf.add_(self.rew_buf)
         
         self.reset_buf.zero_()
-        self.reset_buf[(target_distance > 3).all(-1)] = 1
+        # self.reset_buf[(target_distance > 3).all(-1)] = 1
         self.reset_buf[pos[..., 2] < 0.1] = 1
         self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
@@ -310,19 +313,21 @@ class TargetHard(QuadrotorBase):
         super().reset_actors(env_ids)
         env_states = self.root_states[env_ids].contiguous()
         for callback in self.reset_callbacks:
-            callback(env_states)
+            callback(env_ids, env_states)
         self.root_states[env_ids] = env_states
-        self.extras["init_states"][env_ids] = self.root_states[env_ids]
     
     def agents_step(self, action_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
         obs_dict, reward, done, info = self.step(action_dict["predator"])
         return {"predator": (obs_dict, reward, done)}, info
     
     def reset(self) -> Dict[str, torch.Tensor]:
-        self.extras["init_states"] = self.root_states.clone()
+        self.extras["task_codes"] = torch.zeros(self.num_envs, self.num_agents, dtype=int, device=self.device)
         obs_dict = super().reset()
         return {"predator": obs_dict}
     
+    def parse_tasks(self, task_codes) -> torch.Tensor:
+        return self.grid_centers[task_codes]
+
 class PredatorPrey(QuadrotorBase):
 
     agents = ["predator", "prey"]

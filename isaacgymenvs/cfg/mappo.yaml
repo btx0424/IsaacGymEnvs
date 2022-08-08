@@ -8,8 +8,10 @@ experiment: ''
 num_envs: 16384
 num_eval_envs: 4
 num_agents: ${task.env.numAgents}
-log_interval: 5
-use_cl: true
+log_interval: 10
+eval_interval: 50
+eval_episodes: 8192
+use_cl: false
 
 # seed - set to -1 to choose random seed
 seed: 42
