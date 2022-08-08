@@ -1,5 +1,5 @@
 project: QuadrotorSweep
-name: num_steps
+name: ppo_epoch
 program: train_mappo.py
 
 method: grid
@@ -17,10 +17,11 @@ parameters:
     values: [2]
 
   params.num_steps:
-    values: [8, 64]
+    values: [64]
   params.num_mini_batch:
     values: [16, 32]
-
+  params.ppo_epoch:
+    values: [10, 16]
   # seed:
   #   values: [31, 54]
 

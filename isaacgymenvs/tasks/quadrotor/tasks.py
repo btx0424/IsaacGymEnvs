@@ -3,8 +3,9 @@ import math
 import numpy as np
 from isaacgym import gymtorch
 from gym import spaces
-from typing import Any, Callable, Dict, Tuple
-from .base import QuadrotorBase, TensorDict
+from typing import Any, Callable, Dict, Sequence, Tuple
+from .base import QuadrotorBase
+from torchrl.data import TensorDict
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
     return x / (1e-7 + x.norm(dim=-1, keepdim=True))
@@ -156,12 +157,13 @@ class TargetHard(QuadrotorBase):
         # task specification
         self.capture_radius: float = cfg.get("captureRadius", 0.3)
         self.success_threshold: int = cfg.get("successThreshold", 50)
+        self.target_speed = cfg.get("targetSpeed")
         self.target_speeds = torch.ones((self.num_envs, self.num_targets, 1), device=self.device)
-        self.target_speeds *= cfg.get("targetSpeed", 1.)
         self.boundary_radius  = cfg.get("boundaryRadius", 2.5)
         assert self.boundary_radius > 1
-
-        def reset_targets(env_ids, env_states):
+        self.task_spec = cfg.get("taskSpec", ["target_speed"])
+        
+        def reset_targets(envs, env_ids, env_states):
             env_positions = env_states[..., :3]
             env_velocities = env_states[..., 7:10]
             spacing = torch.linspace(0, self.max_episode_length, self.num_targets+1, device=self.device)[:-1]
@@ -171,15 +173,26 @@ class TargetHard(QuadrotorBase):
             env_positions[:, self.env_actor_index["target"], 2] = 0.5
             env_velocities[:, self.env_actor_index["target"]] = 0
         
-        def reset_quadrotors(env_ids, env_states):
+        def reset_quadrotors(envs, env_ids, env_states):
             env_positions = env_states[..., :3]
             randperm = torch.randperm(len(self.grid_avail), device=self.device)
             num_samples = len(env_positions)*self.num_agents
             sample_idx = randperm[torch.arange(num_samples).reshape(len(env_positions), self.num_agents)%len(self.grid_avail)]
-            self.extras["task_codes"][env_ids] = sample_idx
+            if "spawn_pos" in self.task_spec:
+                self.extras["task_config"]["spawn_pos_idx"][env_ids] = sample_idx
+            if "target_speed" in self.task_spec:
+                self.extras["task_config"]["target_speed"][env_ids] = self.target_speeds[env_ids]
             env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
 
         self.reset_callbacks = [reset_targets, reset_quadrotors]
+        if isinstance(self.target_speed, Sequence):
+            assert len(self.target_speed) == 2 and self.target_speed[0] <= self.target_speed[1], "Invalid target speed range"
+            def sample_speed(envs, env_ids, env_states):
+                self.target_speeds[env_ids] = \
+                    torch.rand(len(env_ids), device=self.device) * (self.target_speed[1] - self.target_speed[0]) + self.target_speed[0]
+            self.reset_callbacks.append(sample_speed)
+        else:
+            self.target_speeds *= self.target_speed
 
     def allocate_buffers(self):
         super().allocate_buffers()
@@ -313,7 +326,7 @@ class TargetHard(QuadrotorBase):
         super().reset_actors(env_ids)
         env_states = self.root_states[env_ids].contiguous()
         for callback in self.reset_callbacks:
-            callback(env_ids, env_states)
+            callback(self, env_ids, env_states)
         self.root_states[env_ids] = env_states
     
     def agents_step(self, action_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
@@ -321,12 +334,24 @@ class TargetHard(QuadrotorBase):
         return {"predator": (obs_dict, reward, done)}, info
     
     def reset(self) -> Dict[str, torch.Tensor]:
-        self.extras["task_codes"] = torch.zeros(self.num_envs, self.num_agents, dtype=int, device=self.device)
+        self.extras["task_config"] = TensorDict({
+            "spawn_pos_idx": torch.zeros(self.num_envs, self.num_agents, dtype=int, device=self.device),
+            "target_speed": torch.zeros_like(self.target_speeds)
+        }, batch_size=self.num_envs)
         obs_dict = super().reset()
         return {"predator": obs_dict}
     
-    def parse_tasks(self, task_codes) -> torch.Tensor:
-        return self.grid_centers[task_codes]
+    def set_tasks(self, 
+            env_ids: torch.Tensor, 
+            task_config: Dict[str, torch.Tensor],
+            env_states: torch.Tensor):
+        if "spawn_pos" in self.task_spec:
+            spawn_pos_idx = task_config["spawn_pos_idx"]
+            drone_positions = env_states[:, self.env_actor_index["drone"], :3]
+            drone_positions[:] = self.grid_centers[spawn_pos_idx]
+        if "target_speed" in self.task_spec:
+            target_speed = task_config["target_speed"]
+            self.target_speeds[env_ids] = target_speed
 
 class PredatorPrey(QuadrotorBase):
 

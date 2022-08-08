@@ -18,6 +18,8 @@ from isaacgymenvs.learning.mappo.utils.shared_buffer import SharedReplayBuffer
 
 Agent = str
 
+torch.autograd.set_detect_anomaly(True)
+
 @dataclass
 class RunnerConfig:
     num_envs: int
@@ -132,17 +134,16 @@ class DroneRunner(Runner):
 
         # setup CL
         if self.use_cl:
-            assert hasattr(self.envs, "parse_tasks")
             tasks = TaskDist(capacity=16384)
-            def sample_task(env_ids, env_states: torch.Tensor):
+            def sample_task(envs, env_ids, env_states: torch.Tensor):
                 if self.training and len(tasks) > 0:
                     p = np.random.rand()
                     if p < 0.3:
-                        env_positions = env_states[:, self.envs.env_actor_index["drone"], :3]
-                        env_positions[:] = self.envs.parse_tasks(tasks.sample_easy(len(env_ids)))
+                        envs.set_tasks(env_ids, tasks.sample(len(env_ids), "easy"), env_states)
                     elif p < 0.6:
-                        env_positions = env_states[:, self.envs.env_actor_index["drone"], :3]
-                        env_positions[:] = self.envs.parse_tasks(tasks.sample_hard(len(env_ids)))
+                        envs.set_tasks(env_ids, tasks.sample(len(env_ids), "hard"), env_states)
+                    else:
+                        pass # leave the envs to use new tasks
 
             self.envs.reset_callbacks.append(sample_task)
 
@@ -216,10 +217,9 @@ class DroneRunner(Runner):
                     self.total_episodes += env_dones.sum()
 
                     if self.use_cl:
-                        metrics = self.task_difficulty_collate_fn(episode_infos, env_dones)
-                        tasks.add(
-                            task_codes=list(infos["task_codes"][env_dones]),
-                            metrics=metrics.tolist())
+                        metrics = self.task_difficulty_collate_fn(episode_info, env_dones)
+                        task_config = infos["task_config"][env_dones]
+                        tasks.add(task_config=task_config, metrics=metrics)
 
                 self.inf_step_time += _inf_end - _step_start
                 self.env_step_time += _env_end - _inf_end
@@ -255,7 +255,9 @@ class DroneRunner(Runner):
                 train_infos["iteration"] = iteration
 
                 if self.use_cl:
-                    train_infos["train/task_dist"] = wandb.Histogram(tasks.metrics)
+                    logging.info(f"Num of tasks: {len(tasks)}")
+                    if len(tasks) > 0:
+                        train_infos["train/task_distribution"] = wandb.Histogram(tasks.metrics.cpu().numpy())
                     
                 self.log(train_infos)
 
@@ -383,8 +385,6 @@ class DroneRunner(Runner):
         # if "best_" + metric not in wandb.run.summary.keys():
         #     wandb.run.summary["best_" + metric] = 0.0
 
-        from tqdm import tqdm
-        # progress = tqdm(total=eval_episodes, desc="Evaluating")
         episode_count = 0
         
         while episode_count < eval_episodes:
@@ -464,34 +464,34 @@ class DroneRunner(Runner):
             print(f"eval/{k}: {v}")
             
         self.log(eval_infos)
-        
+
 class TaskDist:
     def __init__(self, capacity: int=1000) -> None:
         self.capacity = capacity
-        self.tasks = []
-        # self.tasks_easy = []
-        # self.tasks_hard = []
-        self.metrics = []
+        self.task_config = None
+        self.metrics = None
     
-    def add(self, task_codes: List[torch.Tensor], metrics: List[float]) -> None:
-        assert len(task_codes) == len(metrics)
-        self.tasks.extend(task_codes)
-        self.metrics.extend(metrics)
-        if len(self.tasks) > self.capacity:
-            self.tasks = self.tasks[-self.capacity:]
-            self.metrics = self.metrics[-self.capacity:]
+    def add(self, task_config: TensorDict, metrics: torch.Tensor) -> None:
+        if self.task_config is None:
+            self.task_config = task_config
+        else:
+            self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
+        if self.metrics is None:
+            self.metrics = metrics[-self.capacity:]
+        else:
+            self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
     
-    def sample_easy(self, n: int) -> torch.Tensor:
-        assert len(self.tasks) == len(self.metrics)
-        weights = torch.tensor(self.metrics)
-        start_states = random.choices(self.tasks, weights=weights, k=n)
-        return torch.stack(start_states)
-
-    def sample_hard(self, n: int) -> torch.Tensor:
-        assert len(self.tasks) == len(self.metrics)
-        weights = 1 / (1 + np.array(self.metrics) / np.max(self.metrics))
-        start_states = random.choices(self.tasks, weights=weights, k=n)
-        return torch.stack(start_states)
-
+    def sample(self, n: int, mode: str="easy") -> TensorDict:
+        if mode == "easy":
+            weights = self.metrics
+        elif mode == "hard":
+            weights = 500 - self.metrics
+        else: 
+            raise ValueError(f"Unknown mode: {mode}")
+        weights = weights / weights.sum()
+        # sampled_indices = torch.distributions.Multinomial(len(self), probs=weights).sample_n(n).long()
+        sampled_indices = random.choices(np.arange(len(self)), weights=weights, k=n)
+        return self.task_config[sampled_indices]
+        
     def __len__(self) -> int:
-        return len(self.tasks)
+        return 0 if self.metrics is None else len(self.metrics)

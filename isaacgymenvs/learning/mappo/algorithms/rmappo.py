@@ -263,7 +263,9 @@ class MAPPOPolicy:
 
         for k in train_info.keys():
             train_info[k] /= num_updates
- 
+
+        train_info["advantages"] = advantages.mean()
+
         return train_info
 
     def prep_training(self):

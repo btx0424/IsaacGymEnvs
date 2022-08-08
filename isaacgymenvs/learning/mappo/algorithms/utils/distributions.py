@@ -96,20 +96,15 @@ class DiagGaussian(nn.Module):
             return init(m, init_method, lambda x: nn.init.constant_(x, 0), gain)
 
         self.action_dist_cls = TanhNormal if tanh else Normal
-        self.sde = sde
-        if self.sde:
-            self.fc = init_(nn.Linear(num_inputs, num_outputs * 2))
-        else:
-            self.fc_mean = init_(nn.Linear(num_inputs, num_outputs))
-            self.log_std = nn.Parameter(torch.zeros(num_outputs))
+
+        self.fc_mean = init_(nn.Linear(num_inputs, num_outputs))
+        self.log_std = nn.Parameter(torch.zeros(num_outputs))
 
     def forward(self, x):
-        if self.sde:
-            action_mean, action_log_std = torch.split(self.fc(x), 2, dim=-1)
-            return self.action_dist_cls(action_mean, action_log_std.exp())
-        else:
-            action_mean = self.fc_mean(x)
-            return self.action_dist_cls(action_mean, torch.exp(self.log_std)) 
+        action_mean = self.fc_mean(x)
+        assert not torch.isnan(action_mean).any()
+        assert not torch.isnan(self.log_std).any()
+        return self.action_dist_cls(action_mean, torch.exp(self.log_std)) 
 
 
 class Bernoulli(nn.Module):
