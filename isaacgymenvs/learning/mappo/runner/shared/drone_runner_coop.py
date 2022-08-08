@@ -18,8 +18,6 @@ from isaacgymenvs.learning.mappo.utils.shared_buffer import SharedReplayBuffer
 
 Agent = str
 
-torch.autograd.set_detect_anomaly(True)
-
 @dataclass
 class RunnerConfig:
     num_envs: int
@@ -483,14 +481,14 @@ class TaskDist:
     
     def sample(self, n: int, mode: str="easy") -> TensorDict:
         if mode == "easy":
-            weights = self.metrics
+            weights = self.metrics + 1
         elif mode == "hard":
-            weights = 500 - self.metrics
+            weights = 500 - self.metrics + 1
         else: 
             raise ValueError(f"Unknown mode: {mode}")
-        weights = weights / weights.sum()
-        # sampled_indices = torch.distributions.Multinomial(len(self), probs=weights).sample_n(n).long()
-        sampled_indices = random.choices(np.arange(len(self)), weights=weights, k=n)
+        # weights = weights / weights.sum()
+        sampled_indices = weights.multinomial(n, replacement=True)
+        # sampled_indices = random.choices(np.arange(len(self)), weights=weights, k=n)
         return self.task_config[sampled_indices]
         
     def __len__(self) -> int:
