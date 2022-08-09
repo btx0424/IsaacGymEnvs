@@ -5,7 +5,6 @@ import time
 from typing import Any, Dict, Tuple, Union, List
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from isaacgymenvs.tasks.quadrotor import QuadrotorBase
-from isaacgymenvs.tasks.quadrotor.base import TensorDict
 import numpy as np
 import torch
 import wandb
@@ -40,6 +39,14 @@ class PPOConfig:
     num_steps: int = 16
     num_mini_batch: int = 8
 
+class TensorDict(Dict[str, torch.Tensor]):
+    def reshape(self, *shape: int):
+        for key, value in self.items():
+            self[key] = value.reshape(*shape)
+        return self
+
+    def flatten(self, start_dim: int = 0, end_dim: int = -1):
+        return TensorDict({key: value.flatten(start_dim, end_dim) for key, value in self.items()})
 
 class DroneRunner(Runner):
     def __init__(self, config):
@@ -125,7 +132,8 @@ class DroneRunner(Runner):
                 buffer.share_obs[0] = agent_obs_dict["state"].reshape(self.num_envs, self.num_agents[agent], -1)
 
 
-        episode_infos = defaultdict(lambda: [])
+        episode_infos = defaultdict(list)
+        distributions = defaultdict(list)
         metric = "success"
         if "best_" + metric not in wandb.run.summary.keys():
             wandb.run.summary["best_" + metric] = 0.0
@@ -216,8 +224,12 @@ class DroneRunner(Runner):
 
                     if self.use_cl:
                         metrics = self.task_difficulty_collate_fn(episode_info, env_dones)
-                        task_config = infos["task_config"][env_dones]
+                        task_config: TensorDict = infos["task_config"][env_dones]
                         tasks.add(task_config=task_config, metrics=metrics)
+
+                        for k, v in task_config.items():
+                            if v.squeeze(-1).dim() == 1: # e.g., target_speed
+                                distributions[k].extend(v.tolist())
 
                 self.inf_step_time += _inf_end - _step_start
                 self.env_step_time += _env_end - _inf_end
@@ -235,8 +247,8 @@ class DroneRunner(Runner):
                 progress_str = f"iteration: {iteration}/{self.max_iterations}, env steps: {self.total_env_steps}, episodes: {self.total_episodes}"
                 performance_str = f"runtime: {self.env_step_time:.2f} (env), {self.inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total), fps: {fps:.2f}"
                 
-                print(progress_str)
-                print(performance_str)
+                logging.info(progress_str)
+                logging.info(performance_str)
 
                 for k, v in episode_infos.items():
                     v = np.array(v).mean(0)
@@ -248,14 +260,19 @@ class DroneRunner(Runner):
                     print(f"train/{k}: {v}")
                 episode_infos.clear()
 
+                for k, v in distributions.items():
+                    train_infos[f"train/{k}_distribution"] = wandb.Histogram(v)
+                distributions.clear()
+
                 train_infos["env_step"] = self.total_env_steps
                 train_infos["episode"] = self.total_episodes
                 train_infos["iteration"] = iteration
+                train_infos["fps"] = fps
 
                 if self.use_cl:
                     logging.info(f"Num of tasks: {len(tasks)}")
                     if len(tasks) > 0:
-                        train_infos["train/task_distribution"] = wandb.Histogram(tasks.metrics.cpu().numpy())
+                        train_infos["train/task_buffer_difficulty"] = wandb.Histogram(tasks.metrics.cpu().numpy())
                     
                 self.log(train_infos)
 
@@ -379,9 +396,8 @@ class DroneRunner(Runner):
         already_reset = torch.zeros_like(self.envs.progress_buf, dtype=bool)
 
         episode_infos = defaultdict(lambda: [])
-        # metric = "success_mean"
-        # if "best_" + metric not in wandb.run.summary.keys():
-        #     wandb.run.summary["best_" + metric] = 0.0
+        scatter_plot_data = defaultdict(lambda: [])
+        metric = "success"
 
         episode_count = 0
         
@@ -447,6 +463,11 @@ class DroneRunner(Runner):
                         episode_infos[k].extend(v[valid_envs].tolist())
                     episode_count += valid_envs.sum()
                     # progress.update(valid_envs.sum().item())
+                    task_config: TensorDict = infos["task_config"][valid_envs]
+                    for k, v in task_config.items():
+                        if v.squeeze(-1).dim() == 1:
+                            scatter_plot_data[metric].extend(episode_info[metric][env_dones].tolist())
+                            scatter_plot_data[k].extend(v.squeeze(-1).tolist()) # (batch_size, 1) -> List
                 already_reset |= env_dones
 
             for buffer in self.buffers.values(): buffer.after_update()
@@ -460,7 +481,13 @@ class DroneRunner(Runner):
             else:
                 eval_infos[f"eval/{k}"] = v
             print(f"eval/{k}: {v}")
-            
+        
+        if len(scatter_plot_data) == 2:
+            data = list(zip(*scatter_plot_data.values()))
+            keys = list(scatter_plot_data.keys())
+            table = wandb.Table(data=data, columns=keys)
+            name = "eval/" + " vs ".join(keys)
+            eval_infos[name] = wandb.plot.scatter(table, *keys, title=name)
         self.log(eval_infos)
 
 class TaskDist:

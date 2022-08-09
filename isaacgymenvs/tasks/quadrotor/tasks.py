@@ -158,7 +158,7 @@ class TargetHard(QuadrotorBase):
         self.capture_radius: float = cfg.get("captureRadius", 0.3)
         self.success_threshold: int = cfg.get("successThreshold", 50)
         self.target_speed = cfg.get("targetSpeed")
-        self.target_speeds = torch.ones((self.num_envs, self.num_targets, 1), device=self.device)
+        self.target_speeds = torch.ones(self.num_envs, device=self.device) # all targets have the same speed
         self.boundary_radius  = cfg.get("boundaryRadius", 2.5)
         assert self.boundary_radius > 1
         self.task_spec = cfg.get("taskSpec", ["target_speed"])
@@ -174,15 +174,14 @@ class TargetHard(QuadrotorBase):
             env_velocities[:, self.env_actor_index["target"]] = 0
         
         def reset_quadrotors(envs, env_ids, env_states):
-            env_positions = env_states[..., :3]
-            randperm = torch.randperm(len(self.grid_avail), device=self.device)
-            num_samples = len(env_positions)*self.num_agents
-            sample_idx = randperm[torch.arange(num_samples).reshape(len(env_positions), self.num_agents)%len(self.grid_avail)]
             if "spawn_pos" in self.task_spec:
-                self.extras["task_config"]["spawn_pos_idx"][env_ids] = sample_idx
-            if "target_speed" in self.task_spec:
-                self.extras["task_config"]["target_speed"][env_ids] = self.target_speeds[env_ids]
-            env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
+                env_positions = env_states[..., :3]
+                randperm = torch.randperm(len(self.grid_avail), device=self.device)
+                num_samples = len(env_positions)*self.num_agents
+                sample_idx = randperm[torch.arange(num_samples).reshape(len(env_positions), self.num_agents)%len(self.grid_avail)]
+                env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
+            
+                self.task_config["spawn_pos_idx"][env_ids] = sample_idx
 
         self.reset_callbacks = [reset_targets, reset_quadrotors]
         if isinstance(self.target_speed, Sequence):
@@ -190,6 +189,11 @@ class TargetHard(QuadrotorBase):
             def sample_speed(envs, env_ids, env_states):
                 self.target_speeds[env_ids] = \
                     torch.rand(len(env_ids), device=self.device) * (self.target_speed[1] - self.target_speed[0]) + self.target_speed[0]
+                if "target_speed" in self.task_spec:
+                    # no need to manually uppdate
+                    # the tensordict task_config holds self.target_speeds
+                    # self.task_config["target_speed"][env_ids] = self.target_speeds[env_ids]
+                    pass
             self.reset_callbacks.append(sample_speed)
         else:
             self.target_speeds *= self.target_speed
@@ -237,7 +241,7 @@ class TargetHard(QuadrotorBase):
         self.state_space = self.obs_space
     
     def compute_reward_and_reset(self):
-        pos, quat, vel, angvel = self.quadrotor_states
+        pos, quat, vel, angvel = self.quadrotor_states.values()
             
         contact = self.contact_forces[:, self.env_body_index["base"]]
 
@@ -295,6 +299,7 @@ class TargetHard(QuadrotorBase):
         
         # update targets
         target_pos = self.target_pos # (num_envs, num_targets, 3)
+        # imaginary predator at the boundary
         boundary_pos = target_pos.clone().view(self.num_envs, self.num_targets, 1, 3)
         boundary_pos[..., :2] = normalize(boundary_pos[..., :2]) * self.boundary_radius
         quadrotor_pos = self.quadrotor_pos \
@@ -304,7 +309,7 @@ class TargetHard(QuadrotorBase):
         d = target_pos.view(self.num_envs, self.num_targets, 1, 3) - force_sources
         distance = torch.norm(d, dim=-1, keepdim=True)
         forces = d / (1e-7 + distance**2)
-        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds
+        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds.view(-1, 1, 1)
         
         target_pos[..., 2].clamp_(0.2, self.MAX_XYZ[2]-0.2)
         self.target_pos = target_pos # necessary?
@@ -334,9 +339,9 @@ class TargetHard(QuadrotorBase):
         return {"predator": (obs_dict, reward, done)}, info
     
     def reset(self) -> Dict[str, torch.Tensor]:
-        self.extras["task_config"] = TensorDict({
+        self.task_config = self.extras["task_config"] = TensorDict({
             "spawn_pos_idx": torch.zeros(self.num_envs, self.num_agents, dtype=int, device=self.device),
-            "target_speed": torch.zeros_like(self.target_speeds)
+            "target_speed": self.target_speeds
         }, batch_size=self.num_envs)
         obs_dict = super().reset()
         return {"predator": obs_dict}
@@ -351,7 +356,7 @@ class TargetHard(QuadrotorBase):
             drone_positions[:] = self.grid_centers[spawn_pos_idx]
         if "target_speed" in self.task_spec:
             target_speed = task_config["target_speed"]
-            self.target_speeds[env_ids] = target_speed
+            self.target_speeds[env_ids] = target_speed.squeeze()
 
 class PredatorPrey(QuadrotorBase):
 

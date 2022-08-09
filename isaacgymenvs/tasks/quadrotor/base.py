@@ -9,30 +9,16 @@ from xml.etree import ElementTree
 from typing import Callable, Dict, Tuple, Any
 from torch import Tensor
 from collections import defaultdict
+from torchrl.data.tensordict.tensordict import TensorDictBase
 
 from tqdm import tqdm
 from .controller import DSLPIDControl
 from ..base.vec_task import MultiAgentVecTask
 
-class TensorDict(Dict[str, Tensor]):
-    def reshape(self, *shape: int):
-        for key, value in self.items():
-            self[key] = value.reshape(*shape)
-        return self
+from torchrl.data import TensorDict
+from torchrl.envs.common import _EnvClass 
 
-    def flatten(self, start_dim: int = 0, end_dim: int = -1):
-        return TensorDict({key: value.flatten(start_dim, end_dim) for key, value in self.items()})
-    
-
-class TensorTuple(Tuple[torch.Tensor, ...]):
-    def reshape(self, *shape: int):
-        return TensorTuple(v.reshape(*shape) for v in self)
-
-    def flatten(self, start_dim: int = 0, end_dim: int = -1):
-        return TensorTuple(v.flatten(start_dim, end_dim) for v in self)
-
-
-class QuadrotorBase(MultiAgentVecTask):
+class QuadrotorBase(MultiAgentVecTask, _EnvClass):
     
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         
@@ -82,7 +68,6 @@ class QuadrotorBase(MultiAgentVecTask):
         self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
         
         self.act_type = cfg["env"].get("actType", "pid_vel")
-        assert self.act_type in ["pid_vel", "pid_pos", "multi_discrete"]
         self.obs_type = cfg["env"].get("obsType", "root_state")
         self.create_act_space_and_processor(self.act_type)
         self.create_obs_space_and_processor(self.obs_type)
@@ -287,38 +272,34 @@ class QuadrotorBase(MultiAgentVecTask):
     def compute_reward_and_reset(self):
         raise NotImplementedError
 
-    def step(self, actions: torch.Tensor, flatten=True) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
+    def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
         actions = actions.view(self.num_envs, self.num_agents, -1)
         actions = self.act_processor(actions)
 
         obs_dict, reward, done, info = super().step(actions)
-        obs_dict = TensorDict(obs_dict)
+        obs_dict = TensorDict(obs_dict, batch_size=[self.num_envs, self.num_agents])
         self.obs_processor(obs_dict)
         
-        if flatten:
-            return obs_dict.flatten(end_dim=1), reward.flatten(end_dim=1), done.flatten(end_dim=1), info
-        else:
-            return obs_dict, reward, done, info
+        return obs_dict, reward, done, info
 
-    def reset(self, flatten=True) -> Dict[str, torch.Tensor]:
-        self.reset_idx(torch.arange(self.num_envs))
-        obs_dict = TensorDict(super().reset())
-        self.obs_processor(obs_dict)
+    def reset(self, tensordict: TensorDict=None, **kwargs) -> TensorDictBase:
+        tensordict_reset = TensorDict({}, batch_size=(self.num_envs, self.num_agents))
+        self.obs_processor(tensordict_reset)
         self.extras["episode"] = {}
         self.viewer_lines = []
-        if flatten:
-            return obs_dict.flatten(end_dim=1)
-        else:
-            return obs_dict
+        self.reset_idx(torch.arange(self.num_envs))
+        return tensordict_reset
 
     def refresh_tensors(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
 
     @property
-    def quadrotor_states(self) -> TensorTuple:
-        return TensorTuple(self.root_states[:, self.env_actor_index["drone"]]\
-            .split_with_sizes((3, 4, 3, 3), dim=-1))
+    def quadrotor_states(self) -> TensorDict:
+        pos, quat, linvel, angvel = self.root_states[:, self.env_actor_index["drone"]]\
+            .split_with_sizes((3, 4, 3, 3), dim=-1)
+        return TensorDict(
+            {"pos":pos, "quat":quat, "linvel":linvel, "angvel":angvel}, (self.num_envs, self.num_agents))
 
     @property
     def quadrotor_pos(self) -> Tensor:
@@ -353,13 +334,13 @@ class QuadrotorBase(MultiAgentVecTask):
     
     def create_obs_space_and_processor(self, obs_type=None) -> None:
         raise NotImplementedError
-
+    
     def create_act_space_and_processor(self, act_type) -> None:
         if act_type == "pid_pos":
             ones = np.ones(3)
             self.act_space = spaces.Box(-ones, ones)
             def act_processor(actions: Tensor) -> Tensor:
-                pos, quat, vel, angvel = self.quadrotor_states.flatten(end_dim=-2)
+                pos, quat, vel, angvel = self.quadrotor_states.reshape(-1).values()
                 target_pos = pos + actions.reshape(-1, 3)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], target_pos[:self.num_agents]], dim=1).cpu().numpy()
@@ -378,7 +359,7 @@ class QuadrotorBase(MultiAgentVecTask):
             ones = np.ones(3)
             self.act_space = spaces.Box(-ones * 3, ones * 3)
             def act_processor(actions: Tensor) -> Tensor:
-                pos, quat, vel, angvel = self.quadrotor_states.flatten(end_dim=-2)
+                pos, quat, vel, angvel = self.quadrotor_states.reshape(-1).values()
                 target_vel = actions.reshape(-1, 3)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], pos[:self.num_agents] + target_vel[:self.num_agents]], dim=1).cpu().numpy()
@@ -397,7 +378,7 @@ class QuadrotorBase(MultiAgentVecTask):
             self.act_space = spaces.Tuple([spaces.Discrete(3)] * 3)
             self.act_space = spaces.MultiDiscrete([3, 3, 3])
             def act_processor(actions: Tensor) -> Tensor:
-                pos, quat, vel, angvel = self.quadrotor_states.flatten(end_dim=-2)
+                pos, quat, vel, angvel = self.quadrotor_states.reshape(-1).values()
                 target_vel = (actions.reshape(-1, 3) - 1)
                 if self.viewer:
                     points = torch.cat([pos[:self.num_agents], pos[:self.num_agents] + target_vel[:self.num_agents]], dim=1).cpu().numpy()

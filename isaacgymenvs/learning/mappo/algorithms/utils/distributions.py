@@ -102,6 +102,7 @@ class DiagGaussian(nn.Module):
 
     def forward(self, x):
         action_mean = self.fc_mean(x)
+        assert not torch.isnan(action_mean).any()
         return self.action_dist_cls(action_mean, torch.exp(self.log_std)) 
 
 

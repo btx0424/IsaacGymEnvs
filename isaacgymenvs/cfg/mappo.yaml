@@ -38,7 +38,7 @@ params:
   # ppo
   num_steps: 64
   num_mini_batch: 24
-  ppo_epoch: 8
+  ppo_epoch: 5
   clip_param: 0.2
   entropy_coef: 0.01
 
