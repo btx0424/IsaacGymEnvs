@@ -4,6 +4,8 @@ import numpy as np
 from isaacgym import gymtorch
 from gym import spaces
 from typing import Any, Callable, Dict, Sequence, Tuple
+
+from torchrl.data.tensordict.tensordict import TensorDictBase
 from .base import QuadrotorBase
 from torchrl.data import TensorDict
 
@@ -348,7 +350,7 @@ class TargetHard(QuadrotorBase):
     
     def set_tasks(self, 
             env_ids: torch.Tensor, 
-            task_config: Dict[str, torch.Tensor],
+            task_config: TensorDictBase,
             env_states: torch.Tensor):
         if "spawn_pos" in self.task_spec:
             spawn_pos_idx = task_config["spawn_pos_idx"]

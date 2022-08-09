@@ -285,7 +285,7 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
     def reset(self, tensordict: TensorDict=None, **kwargs) -> TensorDictBase:
         tensordict_reset = TensorDict({}, batch_size=(self.num_envs, self.num_agents))
         self.obs_processor(tensordict_reset)
-        self.extras["episode"] = {}
+        self.extras["episode"] = TensorDict({}, batch_size=(self.num_envs,))
         self.viewer_lines = []
         self.reset_idx(torch.arange(self.num_envs))
         return tensordict_reset

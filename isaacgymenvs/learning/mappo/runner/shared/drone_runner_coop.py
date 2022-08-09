@@ -48,6 +48,18 @@ class TensorDict(Dict[str, torch.Tensor]):
     def flatten(self, start_dim: int = 0, end_dim: int = -1):
         return TensorDict({key: value.flatten(start_dim, end_dim) for key, value in self.items()})
 
+def collect_episode_infos(infos: Dict[str, List], tag: str) -> Dict:
+    results = {}
+    for k, v in infos.items():
+        v = np.array(v).mean(0) # average over episodes
+        if v.size > 1:
+            results[f"{tag}/{k}"] = wandb.Histogram(v)
+            results[f"{tag}/{k}_mean"] = v.mean()
+        else:
+            results[f"{tag}/{k}"] = v.item()
+        print(f"{tag}/{k}: {v}")
+    return results
+
 class DroneRunner(Runner):
     def __init__(self, config):
         self.config = config
@@ -111,7 +123,7 @@ class DroneRunner(Runner):
         self.episodes_this_run = 0
 
         if self.use_cl:
-            self.task_difficulty_collate_fn = lambda episode_infos, env_done: episode_infos["reward_capture"][env_done].mean(-1)
+            self.task_difficulty_collate_fn = lambda episode_infos: episode_infos["reward_capture"].mean(-1)
 
     def run(self):
         self.training = True
@@ -142,12 +154,18 @@ class DroneRunner(Runner):
         if self.use_cl:
             tasks = TaskDist(capacity=16384)
             def sample_task(envs, env_ids, env_states: torch.Tensor):
+                # z = (1-self.env_steps_this_run / self.max_env_steps)*0.7
+                z = 0.4
                 if self.training and len(tasks) > 0:
                     p = np.random.rand()
-                    if p < 0.3:
-                        envs.set_tasks(env_ids, tasks.sample(len(env_ids), "easy"), env_states)
-                    elif p < 0.6:
-                        envs.set_tasks(env_ids, tasks.sample(len(env_ids), "hard"), env_states)
+                    if p < z:
+                        sampled_tasks = tasks.sample(len(env_ids), "easy")
+                        if sampled_tasks is not None:
+                            envs.set_tasks(env_ids, sampled_tasks, env_states)
+                    elif p < 0.7:
+                        sampled_tasks = tasks.sample(len(env_ids), "hard")
+                        if sampled_tasks is not None:
+                            envs.set_tasks(env_ids, sampled_tasks, env_states)
                     else:
                         pass # leave the envs to use new tasks
 
@@ -217,19 +235,20 @@ class DroneRunner(Runner):
 
                 # record statistics
                 if env_dones.any():
-                    episode_info: Dict[str, torch.Tensor] = infos.get("episode", {})
+                    episode_info = infos["episode"][env_dones]
                     for k, v in episode_info.items():
-                        episode_infos[k].extend(v[env_dones].tolist())
-                    self.total_episodes += env_dones.sum()
+                        episode_infos[k].extend(v.tolist())
 
                     if self.use_cl:
-                        metrics = self.task_difficulty_collate_fn(episode_info, env_dones)
+                        metrics = self.task_difficulty_collate_fn(episode_info)
                         task_config: TensorDict = infos["task_config"][env_dones]
                         tasks.add(task_config=task_config, metrics=metrics)
 
                         for k, v in task_config.items():
                             if v.squeeze(-1).dim() == 1: # e.g., target_speed
-                                distributions[k].extend(v.tolist())
+                                distributions[k].extend(v.squeeze(-1).tolist())
+
+                    self.total_episodes += env_dones.sum()
 
                 self.inf_step_time += _inf_end - _step_start
                 self.env_step_time += _env_end - _inf_end
@@ -250,18 +269,13 @@ class DroneRunner(Runner):
                 logging.info(progress_str)
                 logging.info(performance_str)
 
-                for k, v in episode_infos.items():
-                    v = np.array(v).mean(0)
-                    if isinstance(v, np.ndarray):
-                        train_infos[f"train/{k}"] = wandb.Histogram(v)
-                        train_infos[f"train/{k}_mean"] = v.mean()
-                    else:
-                        train_infos[f"train/{k}"] = v
-                    print(f"train/{k}: {v}")
+                train_infos.update(collect_episode_infos(episode_infos, "train"))
                 episode_infos.clear()
 
                 for k, v in distributions.items():
-                    train_infos[f"train/{k}_distribution"] = wandb.Histogram(v)
+                    v = np.array(v).reshape(-1)
+                    np_histogram = np.histogram(v, density=True)
+                    train_infos[f"train/{k}_distribution"] = wandb.Histogram(np_histogram=np_histogram)
                 distributions.clear()
 
                 train_infos["env_step"] = self.total_env_steps
@@ -286,6 +300,9 @@ class DroneRunner(Runner):
             if iteration % self.eval_interval == 0:
                 self.training = False
                 self.eval(self.eval_episodes)
+                for agent, policy in self.policies.items():
+                    policy.actor.train()
+                    policy.critic.train()
                 self.training = True
 
             if self.env_steps_this_run > self.max_env_steps:
@@ -362,6 +379,10 @@ class DroneRunner(Runner):
         self.total_env_steps = checkpoint["env_steps"]
 
     def eval(self, eval_episodes):
+        for agent, policy in self.policies.items():
+            policy.actor.eval()
+            policy.critic.eval()
+
         if self.env_steps_this_run == 0:
             obs_dict = self.envs.reset()
 
@@ -397,7 +418,7 @@ class DroneRunner(Runner):
 
         episode_infos = defaultdict(lambda: [])
         scatter_plot_data = defaultdict(lambda: [])
-        metric = "success"
+        metric = "reward_capture"
 
         episode_count = 0
         
@@ -458,29 +479,27 @@ class DroneRunner(Runner):
                 # record statistics
                 valid_envs = env_dones & already_reset
                 if valid_envs.any():
-                    episode_info: Dict[str, torch.Tensor] = infos.get("episode", {})
+                    episode_info = infos["episode"][valid_envs]
+                    task_config = infos["task_config"][valid_envs]
+
                     for k, v in episode_info.items():
-                        episode_infos[k].extend(v[valid_envs].tolist())
-                    episode_count += valid_envs.sum()
-                    # progress.update(valid_envs.sum().item())
-                    task_config: TensorDict = infos["task_config"][valid_envs]
+                        episode_infos[k].extend(v.tolist())
+
                     for k, v in task_config.items():
                         if v.squeeze(-1).dim() == 1:
-                            scatter_plot_data[metric].extend(episode_info[metric][env_dones].tolist())
-                            scatter_plot_data[k].extend(v.squeeze(-1).tolist()) # (batch_size, 1) -> List
+                            episode_metric = episode_info[metric]
+                            if episode_metric.dim() > 1: 
+                                episode_metric = episode_metric.mean(-1)
+                            scatter_plot_data[metric].extend(episode_metric.tolist())
+                            scatter_plot_data[k].extend(v.squeeze(-1).tolist()) # (num_envs, 1) -> List
+                    
+                    episode_count += valid_envs.sum()
                 already_reset |= env_dones
 
             for buffer in self.buffers.values(): buffer.after_update()
 
         eval_infos = {"env_step": self.total_env_steps}
-        for k, v in episode_infos.items():
-            v = np.array(v).mean(0)
-            if isinstance(v, np.ndarray):
-                eval_infos[f"eval/{k}"] = wandb.Histogram(v)
-                eval_infos[f"eval/{k}_mean"] = v.mean()
-            else:
-                eval_infos[f"eval/{k}"] = v
-            print(f"eval/{k}: {v}")
+        eval_infos.update(collect_episode_infos(episode_infos, "eval"))
         
         if len(scatter_plot_data) == 2:
             data = list(zip(*scatter_plot_data.values()))
@@ -491,32 +510,39 @@ class DroneRunner(Runner):
         self.log(eval_infos)
 
 class TaskDist:
-    def __init__(self, capacity: int=1000) -> None:
+    def __init__(self, capacity: int=1000, threshold:float=15) -> None:
         self.capacity = capacity
         self.task_config = None
         self.metrics = None
+        self.threshold = threshold
     
     def add(self, task_config: TensorDict, metrics: torch.Tensor) -> None:
-        if self.task_config is None:
-            self.task_config = task_config
-        else:
-            self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
-        if self.metrics is None:
-            self.metrics = metrics[-self.capacity:]
-        else:
-            self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
+        valid = metrics > self.threshold
+        if valid.any():
+            task_config = task_config[valid]
+            metrics = metrics[valid]
+
+            if self.task_config is None:
+                self.task_config = task_config
+            else:
+                self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
+            if self.metrics is None:
+                self.metrics = metrics[-self.capacity:]
+            else:
+                self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
     
-    def sample(self, n: int, mode: str="easy") -> TensorDict:
+    def sample(self, n: int, mode: str="easy") -> Union[TensorDict, None]:
         if mode == "easy":
-            weights = self.metrics + 1
+            task_config = self.task_config[self.metrics>=self.threshold]
         elif mode == "hard":
-            weights = 500 - self.metrics + 1
+            task_config = self.task_config[self.metrics<self.threshold]
         else: 
             raise ValueError(f"Unknown mode: {mode}")
-        # weights = weights / weights.sum()
-        sampled_indices = weights.multinomial(n, replacement=True)
-        # sampled_indices = random.choices(np.arange(len(self)), weights=weights, k=n)
-        return self.task_config[sampled_indices]
+
+        if task_config.batch_size[0] > 0:
+            return task_config[torch.randint(0, task_config.batch_size[0], (n,))]
+        else:
+            return None
         
     def __len__(self) -> int:
         return 0 if self.metrics is None else len(self.metrics)

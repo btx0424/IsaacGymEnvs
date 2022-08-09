@@ -36,17 +36,29 @@ def main(cfg):
     if cfg.capture_video: cfg.headless = False
     setproctitle.setproctitle(run_name)
 
-    run_id = cfg.resume_id or wandb.util.generate_id()
-    run = wandb.init(
-        id=run_id,
-        project=cfg.wandb_project,
-        group=cfg.wandb_group,
-        entity=cfg.wandb_entity,
-        config=OmegaConf.to_container(cfg, resolve=True),
-        monitor_gym=True,
-        name=run_name,
-        resume="allow",
-    )
+    if cfg.run_id is not None:
+        run = wandb.init(
+            id=cfg.run_id,
+            project=cfg.wandb_project,
+            group=cfg.wandb_group,
+            entity=cfg.wandb_entity,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            monitor_gym=True,
+            name=run_name,
+            resume="allow",
+        )
+    elif cfg.run_path is not None:
+        run = wandb.init(
+            project=cfg.wandb_project,
+            group=cfg.wandb_group,
+            entity=cfg.wandb_entity,
+            config=OmegaConf.to_container(cfg, resolve=True),
+            monitor_gym=True,
+            name=run_name,
+            resume="allow",
+        )
+    else:
+        raise ValueError("Must provide a run_id or run_path to eval!")
         
     envs: MultiAgentVecTask = create_envs(cfg)
     if cfg.capture_video:
@@ -65,11 +77,10 @@ def main(cfg):
         "envs": envs,
     }
     runner = DroneRunner(config)
-    if cfg.resume_id and run.resumed:
-        logging.info(f"Resuming run {run.id}")
-        wandb.restore("checkpoint.pt")
-        runner.restore()
-    runner.run()
+    logging.info(f"Resuming run {run.id}")
+    wandb.restore("checkpoint.pt")
+    runner.restore()
+    runner.eval()
         
 if __name__ == "__main__":
     main()
