@@ -130,6 +130,7 @@ wandb_group: ${task.name}
 wandb_name: ${task.name}
 wandb_entity: ''
 wandb_project: 'isaacgymenvs'
+wandb_mode: online # set to 'disabled' when debugging locally
 resume_id: 
 run_path:
 

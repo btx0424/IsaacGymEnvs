@@ -1,3 +1,4 @@
+from asyncio.log import logger
 import torch
 import os
 import math
@@ -6,10 +7,11 @@ import numpy as np
 from isaacgym import gymapi, gymtorch, gymutil
 from gym import spaces
 from xml.etree import ElementTree
-from typing import Callable, Dict, Tuple, Any
+from typing import Callable, Dict, Optional, Tuple, Any, List
 from torch import Tensor
 from collections import defaultdict
 from torchrl.data.tensordict.tensordict import TensorDictBase
+from torchrl.envs.utils import step_tensordict
 
 from tqdm import tqdm
 from .controller import DSLPIDControl
@@ -20,6 +22,8 @@ from torchrl.envs.common import _EnvClass
 
 class QuadrotorBase(MultiAgentVecTask, _EnvClass):
     
+    agents: List[str]
+
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         
         # no effect...
@@ -50,9 +54,18 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
         self.root_linvels = vec_root_tensor[..., 7:10]
         self.root_angvels = vec_root_tensor[..., 10:13]
         self.contact_forces: Tensor = gymtorch.wrap_tensor(net_contact_forces).view(self.num_envs, self.bodies_per_env, 3)
-        
+
         self.refresh_tensors()
         self.initial_root_states = self.root_states.clone()
+
+        self._state_tensordict = TensorDict({
+            "root_states": self.root_states,
+            "root_positions": self.root_positions,
+            "root_quats": self.root_quats,
+            "root_linvels": self.root_linvels,
+            "root_angvels": self.root_angvels,
+            "contact_forces": self.contact_forces,
+        }, batch_size=self.num_envs)
 
         self.forces = torch.zeros(
             (self.num_envs, self.bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
@@ -71,6 +84,10 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
         self.obs_type = cfg["env"].get("obsType", "root_state")
         self.create_act_space_and_processor(self.act_type)
         self.create_obs_space_and_processor(self.obs_type)
+
+    @property
+    def state_tensordict(self):
+        return self._state_tensordict
 
     def create_sim(self):
         # create sim
@@ -272,7 +289,7 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
     def compute_reward_and_reset(self):
         raise NotImplementedError
 
-    def step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
+    def agents_step(self, actions: torch.Tensor) -> Tuple[Dict[str, torch.Tensor], torch.Tensor, torch.Tensor, Dict[str, Any]]:
         actions = actions.view(self.num_envs, self.num_agents, -1)
         actions = self.act_processor(actions)
 
@@ -281,6 +298,21 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
         self.obs_processor(obs_dict)
         
         return obs_dict, reward, done, info
+
+    def step(self, tensordict: TensorDictBase) -> TensorDictBase:
+        actions = tensordict["actions"]
+        actions = actions.view(self.num_envs, self.num_agents, -1)
+        actions = self.act_processor(actions)
+
+        _, reward, done, _ = super().step(actions)
+        for agent in self.agents:
+            tensordict[agent]["next_obs"] = self.compute_obs_for(agent)
+        if self.state_space is not None:
+            tensordict["next_state"] = self.compute_state()
+        
+        tensordict["reward"] = reward
+        tensordict["done"] = done
+        return tensordict
 
     def reset(self, tensordict: TensorDict=None, **kwargs) -> TensorDictBase:
         tensordict_reset = TensorDict({}, batch_size=(self.num_envs, self.num_agents))

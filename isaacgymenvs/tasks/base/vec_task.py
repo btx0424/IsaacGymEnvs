@@ -26,7 +26,8 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from typing import Dict, Any, Tuple
+import logging
+from typing import Callable, Dict, Any, Optional, Tuple
 
 import gym
 from gym import spaces
@@ -43,6 +44,9 @@ import sys
 
 import abc
 from abc import ABC
+from torchrl.data.tensordict.tensordict import TensorDictBase
+
+from torchrl.envs.utils import step_tensordict
 
 EXISTING_SIM = None
 SCREEN_CAPTURE_RESOLUTION = (1400, 900)
@@ -768,6 +772,8 @@ class MultiAgentVecTask(VecTask):
         
         self.reward_space = spaces.Box(-np.inf, np.inf, shape=(self.num_rewards,))
 
+        self.batch_size = torch.Size([self.num_envs,])
+
     def allocate_buffers(self):
         # allocate buffers
         self.obs_buf = torch.zeros(
@@ -792,3 +798,45 @@ class MultiAgentVecTask(VecTask):
             action_dict: Dict[str, torch.Tensor]
         ) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
         raise NotImplementedError
+    
+    def rollout(
+        self,
+        max_steps: Optional[int]=None,
+        max_episodes: Optional[int]=None,
+        policy: Optional[Callable[[TensorDictBase], TensorDictBase]] = None,
+        callback = None, #: Optional[Callable[[TensorDictBase, ...], TensorDictBase]] = None,
+        # break_when_any_done: bool = True,
+        return_contiguous: bool = True,
+        tensordict: Optional[TensorDictBase] = None,
+    ):
+        steps = 0
+        episodes = 0
+        if max_steps is not None and max_episodes is None:
+            terminate = lambda: steps >= max_steps
+        elif max_steps is None and max_episodes is not None:
+            terminate = lambda: episodes >= max_episodes
+        else:
+            raise ValueError("Either max_steps or max_episodes must be specified but not both")
+
+        if tensordict is None:
+            logging.warning("No tensordict provided as init obs, resetting env.")
+            tensordict = self.reset()
+        
+        tensordicts = []
+        while not terminate():
+            tensordict = policy(tensordict)
+            tensordict = self.step(tensordict)
+            tensordicts.append(tensordict.clone())
+            for agent, agent_td in tensordict.items():
+                step_tensordict(agent_td, keep_other=True)
+            
+            if callback is not None:
+                callback(self, tensordict)
+                
+            steps += self.num_envs
+            episodes += tensordict["done"].sum()
+        
+        out_td = torch.stack(tensordicts)
+        if return_contiguous:
+            out_td = out_td.contiguous()
+        return out_td
