@@ -43,12 +43,13 @@ def main(cfg):
         project=cfg.wandb_project,
         group=cfg.wandb_group,
         entity=cfg.wandb_entity,
-        config=OmegaConf.to_container(cfg, resolve=True),
         monitor_gym=True,
         name=run_name,
         resume="allow",
     )
-        
+
+    wandb.run.config.update(OmegaConf.to_container(cfg, resolve=True))
+
     envs: MultiAgentVecTask = create_envs(cfg)
     if cfg.capture_video:
         envs.is_vector_env = True
@@ -72,8 +73,10 @@ def main(cfg):
         runner.restore()
     elif cfg.run_path:
         logging.info(f"Loading run from {cfg.run_path}.")
+        api = wandb.Api()
+        wandb.config.old_config = api.run(cfg.run_path).config
         wandb.restore("checkpoint.pt", run_path=cfg.run_path)
-        runner.restore()
+        runner.restore(reset_steps=True)
     runner.run()
         
 if __name__ == "__main__":

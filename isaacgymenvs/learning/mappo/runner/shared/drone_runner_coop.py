@@ -236,17 +236,17 @@ class DroneRunner(Runner):
                 # record statistics
                 if env_dones.any():
                     episode_info = infos["episode"][env_dones]
+                    task_config: TensorDict = infos["task_config"][env_dones]
                     for k, v in episode_info.items():
                         episode_infos[k].extend(v.tolist())
 
                     if self.use_cl:
                         metrics = self.task_difficulty_collate_fn(episode_info)
-                        task_config: TensorDict = infos["task_config"][env_dones]
                         tasks.add(task_config=task_config, metrics=metrics)
 
-                        for k, v in task_config.items():
-                            if v.squeeze(-1).dim() == 1: # e.g., target_speed
-                                distributions[k].extend(v.squeeze(-1).tolist())
+                    for k, v in task_config.items():
+                        if v.squeeze(-1).dim() == 1: # e.g., target_speed
+                            distributions[k].extend(v.squeeze(-1).tolist())
 
                     self.total_episodes += env_dones.sum()
 
@@ -369,14 +369,15 @@ class DroneRunner(Runner):
         checkpoint["env_steps"] = self.total_env_steps
         torch.save(checkpoint, os.path.join(wandb.run.dir, "checkpoint.pt"))
 
-    def restore(self):
+    def restore(self, reset_steps=False):
         logging.info(f"Restoring models from {wandb.run.dir}")
         checkpoint = torch.load(os.path.join(wandb.run.dir, "checkpoint.pt"))
         for agent, policy in self.policies.items():
             policy.actor.load_state_dict(checkpoint[agent]["actor"])
             policy.critic.load_state_dict(checkpoint[agent]["critic"])
-        self.total_episodes = checkpoint["episodes"]
-        self.total_env_steps = checkpoint["env_steps"]
+        if not reset_steps:
+            self.total_episodes = checkpoint["episodes"]
+            self.total_env_steps = checkpoint["env_steps"]
 
     def eval(self, eval_episodes, log=True):
         stamp_str = f"Eval at {self.total_env_steps}(total)/{self.env_steps_this_run}(this run) steps."

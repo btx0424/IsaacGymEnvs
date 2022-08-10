@@ -1,37 +1,38 @@
-project: QuadrotorSweep
-name: ppo_epoch
+project: isaacgymenvs
+name: baseline_individual
 program: train_mappo.py
 
 method: grid
 
 metric:
-  name: Episode/success/mean
+  name: eval/success
   goal: maximize
 
 parameters:
-  task: 
-    values:
-      - QuadrotorTargetHard
-  
   task.targetSpeed:
-    values: [2]
+    values: [1, 2, 3, 4]
+  
+  seed:
+    values: [123, 456, 789]
 
-  params.num_steps:
-    values: [64]
-  params.num_mini_batch:
-    values: [16, 32]
-  params.ppo_epoch:
-    values: [10, 16]
+  # params.num_mini_batch:
+  #   values: [16, 32]
+  # params.ppo_epoch:
+  #   values: [10, 16]
   # seed:
   #   values: [31, 54]
 
-  max_env_steps:
-    values:
-      - 500_000_000
+  # max_env_steps:
+  #   values:
+  #     - 500_000_000
 
   # capture_video:
   #   values:
   #     - True
+
+  wandb_name:
+    values:
+      - baseline
 
 command:
   - ${env}

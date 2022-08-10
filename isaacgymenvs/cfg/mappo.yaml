@@ -131,6 +131,8 @@ wandb_name: ${task.name}
 wandb_entity: ''
 wandb_project: 'isaacgymenvs'
 resume_id: 
+run_path:
+
 capture_video: False
 capture_video_freq: 4
 capture_video_len: ${task.env.maxEpisodeLength}
