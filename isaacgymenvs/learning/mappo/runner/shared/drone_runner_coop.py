@@ -155,7 +155,7 @@ class DroneRunner(Runner):
             tasks = TaskDist(capacity=16384)
             def sample_task(envs, env_ids, env_states: torch.Tensor):
                 # z = (1-self.env_steps_this_run / self.max_env_steps)*0.7
-                z = 0.4
+                z = 0.3
                 if self.training and len(tasks) > 0:
                     p = np.random.rand()
                     if p < z:
@@ -378,7 +378,9 @@ class DroneRunner(Runner):
         self.total_episodes = checkpoint["episodes"]
         self.total_env_steps = checkpoint["env_steps"]
 
-    def eval(self, eval_episodes):
+    def eval(self, eval_episodes, log=True):
+        stamp_str = f"Eval at {self.total_env_steps}(total)/{self.env_steps_this_run}(this run) steps."
+        logging.info(stamp_str)
         for agent, policy in self.policies.items():
             policy.actor.eval()
             policy.critic.eval()
@@ -507,36 +509,36 @@ class DroneRunner(Runner):
             table = wandb.Table(data=data, columns=keys)
             name = "eval/" + " vs ".join(keys)
             eval_infos[name] = wandb.plot.scatter(table, *keys, title=name)
-        self.log(eval_infos)
+        
+        if log:
+            self.log(eval_infos)
 
 class TaskDist:
-    def __init__(self, capacity: int=1000, threshold:float=15) -> None:
+    def __init__(self, capacity: int=1000, easy_threshold: float=400, hard_threshold:float=200) -> None:
         self.capacity = capacity
         self.task_config = None
         self.metrics = None
-        self.threshold = threshold
+        self.easy_threshold = easy_threshold
+        self.hard_threshold = hard_threshold
     
     def add(self, task_config: TensorDict, metrics: torch.Tensor) -> None:
-        valid = metrics > self.threshold
-        if valid.any():
-            task_config = task_config[valid]
-            metrics = metrics[valid]
-
-            if self.task_config is None:
-                self.task_config = task_config
-            else:
-                self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
-            if self.metrics is None:
-                self.metrics = metrics[-self.capacity:]
-            else:
-                self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
+        if self.task_config is None:
+            self.task_config = task_config
+        else:
+            self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
+        if self.metrics is None:
+            self.metrics = metrics[-self.capacity:]
+        else:
+            self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
     
     def sample(self, n: int, mode: str="easy") -> Union[TensorDict, None]:
         if mode == "easy":
-            task_config = self.task_config[self.metrics>=self.threshold]
+            task_config = self.task_config[self.metrics>=self.easy_threshold]
         elif mode == "hard":
-            task_config = self.task_config[self.metrics<self.threshold]
-        else: 
+            task_config = self.task_config[self.metrics<self.hard_threshold]
+        elif mode == "medium":
+            task_config = self.task_config[(self.metrics>=self.hard_threshold) & (self.metrics<self.easy_threshold)]
+        else:
             raise ValueError(f"Unknown mode: {mode}")
 
         if task_config.batch_size[0] > 0:

@@ -37,6 +37,7 @@ def main(cfg):
     setproctitle.setproctitle(run_name)
 
     run_id = cfg.resume_id or wandb.util.generate_id()
+    
     run = wandb.init(
         id=run_id,
         project=cfg.wandb_project,
@@ -66,8 +67,12 @@ def main(cfg):
     }
     runner = DroneRunner(config)
     if cfg.resume_id and run.resumed:
-        logging.info(f"Resuming run {run.id}")
+        logging.info(f"Resuming run {run.id}.")
         wandb.restore("checkpoint.pt")
+        runner.restore()
+    elif cfg.run_path:
+        logging.info(f"Loading run from {cfg.run_path}.")
+        wandb.restore("checkpoint.pt", run_path=cfg.run_path)
         runner.restore()
     runner.run()
         

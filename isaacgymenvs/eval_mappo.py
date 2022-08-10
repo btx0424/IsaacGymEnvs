@@ -36,7 +36,9 @@ def main(cfg):
     if cfg.capture_video: cfg.headless = False
     setproctitle.setproctitle(run_name)
 
-    if cfg.run_id is not None:
+    if cfg.resume_id is not None:
+        if cfg.run_path is not None:
+            logging.warning(f"run_path and resume_id are both set, using resume_id {cfg.resume_id}")
         run = wandb.init(
             id=cfg.run_id,
             project=cfg.wandb_project,
@@ -46,7 +48,9 @@ def main(cfg):
             monitor_gym=True,
             name=run_name,
             resume="allow",
+            job_type="eval"
         )
+        wandb.restore("checkpoint.pt")
     elif cfg.run_path is not None:
         run = wandb.init(
             project=cfg.wandb_project,
@@ -56,10 +60,12 @@ def main(cfg):
             monitor_gym=True,
             name=run_name,
             resume="allow",
+            job_type="eval"
         )
+        wandb.restore("checkpoint.pt", run_path=cfg.run_path)
     else:
-        raise ValueError("Must provide a run_id or run_path to eval!")
-        
+        raise ValueError("Must provide a resume_id or run_path to eval!")
+    
     envs: MultiAgentVecTask = create_envs(cfg)
     if cfg.capture_video:
         envs.is_vector_env = True
@@ -77,10 +83,8 @@ def main(cfg):
         "envs": envs,
     }
     runner = DroneRunner(config)
-    logging.info(f"Resuming run {run.id}")
-    wandb.restore("checkpoint.pt")
     runner.restore()
-    runner.eval()
+    runner.eval(cfg.eval_episodes, log=False)
         
 if __name__ == "__main__":
     main()
