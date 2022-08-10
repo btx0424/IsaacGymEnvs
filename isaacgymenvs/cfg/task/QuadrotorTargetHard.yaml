@@ -46,4 +46,4 @@ sim:
     
 targetSpeed: 1
 boundaryRadius: 2.5
-task_spec: ["target_speed", "spawn_pos"]
+taskSpec: ["target_speed", "spawn_pos"]
