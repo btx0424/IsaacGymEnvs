@@ -159,10 +159,6 @@ class DroneRunner(Runner):
                 if self.training and len(tasks) > 0:
                     p = np.random.rand()
                     if p < z:
-                        sampled_tasks = tasks.sample(len(env_ids), "easy")
-                        if sampled_tasks is not None:
-                            envs.set_tasks(env_ids, sampled_tasks, env_states)
-                    elif p < 0.7:
                         sampled_tasks = tasks.sample(len(env_ids), "hard")
                         if sampled_tasks is not None:
                             envs.set_tasks(env_ids, sampled_tasks, env_states)
@@ -193,6 +189,7 @@ class DroneRunner(Runner):
                     rnn_state_actor, rnn_state_critic = rnn_states_dict[agent]                 
                     masks = masks_dict[agent]
                     with torch.no_grad():
+                        assert not torch.isnan(agent_obs_dict["obs"]).any()
                         result_dict = policy.get_action_and_value(
                             share_obs=agent_obs_dict["state"],
                             obs=agent_obs_dict["obs"],
@@ -236,17 +233,18 @@ class DroneRunner(Runner):
                 # record statistics
                 if env_dones.any():
                     episode_info = infos["episode"][env_dones]
-                    task_config: TensorDict = infos["task_config"][env_dones]
+                    task_config: TensorDict = infos.get("task_config")
                     for k, v in episode_info.items():
                         episode_infos[k].extend(v.tolist())
 
                     if self.use_cl:
                         metrics = self.task_difficulty_collate_fn(episode_info)
-                        tasks.add(task_config=task_config, metrics=metrics)
+                        tasks.add(task_config=task_config[env_dones], metrics=metrics)
 
-                    for k, v in task_config.items():
-                        if v.squeeze(-1).dim() == 1: # e.g., target_speed
-                            distributions[k].extend(v.squeeze(-1).tolist())
+                    if task_config is not None:
+                        for k, v in task_config[env_dones].items():
+                            if v.squeeze(-1).dim() == 1: # e.g., target_speed
+                                distributions[k].extend(v.squeeze(-1).tolist())
 
                     self.total_episodes += env_dones.sum()
 
@@ -379,7 +377,7 @@ class DroneRunner(Runner):
             self.total_episodes = checkpoint["episodes"]
             self.total_env_steps = checkpoint["env_steps"]
 
-    def eval(self, eval_episodes, log=True):
+    def eval(self, eval_episodes, log=True, pbar=False):
         stamp_str = f"Eval at {self.total_env_steps}(total)/{self.env_steps_this_run}(this run) steps."
         logging.info(stamp_str)
         for agent, policy in self.policies.items():
@@ -424,7 +422,10 @@ class DroneRunner(Runner):
         metric = "reward_capture"
 
         episode_count = 0
-        
+        if pbar:
+            from tqdm import tqdm
+            _pbar = tqdm(total=eval_episodes, desc="Evaluating")
+
         while episode_count < eval_episodes:
 
             for setp in range(self.num_steps):
@@ -497,6 +498,9 @@ class DroneRunner(Runner):
                             scatter_plot_data[k].extend(v.squeeze(-1).tolist()) # (num_envs, 1) -> List
                     
                     episode_count += valid_envs.sum()
+                    if pbar:
+                        _pbar.update(valid_envs.sum().item())
+                    
                 already_reset |= env_dones
 
             for buffer in self.buffers.values(): buffer.after_update()
@@ -515,7 +519,7 @@ class DroneRunner(Runner):
             self.log(eval_infos)
 
 class TaskDist:
-    def __init__(self, capacity: int=1000, easy_threshold: float=400, hard_threshold:float=200) -> None:
+    def __init__(self, capacity: int=1000, easy_threshold: float=400, hard_threshold:float=250) -> None:
         self.capacity = capacity
         self.task_config = None
         self.metrics = None
@@ -523,14 +527,18 @@ class TaskDist:
         self.hard_threshold = hard_threshold
     
     def add(self, task_config: TensorDict, metrics: torch.Tensor) -> None:
-        if self.task_config is None:
-            self.task_config = task_config
-        else:
-            self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
-        if self.metrics is None:
-            self.metrics = metrics[-self.capacity:]
-        else:
-            self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
+        valid = metrics < self.hard_threshold
+        if valid.any():
+            task_config = task_config[valid]
+            metrics = metrics[valid]
+            if self.task_config is None:
+                self.task_config = task_config
+            else:
+                self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
+            if self.metrics is None:
+                self.metrics = metrics[-self.capacity:]
+            else:
+                self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
     
     def sample(self, n: int, mode: str="easy") -> Union[TensorDict, None]:
         if mode == "easy":

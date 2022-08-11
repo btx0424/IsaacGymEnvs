@@ -13,8 +13,8 @@ import setproctitle
 from isaacgymenvs.tasks import isaacgym_task_map
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from omegaconf import OmegaConf
-# from isaacgymenvs.learning.mappo.runner.shared.drone_runner_coop import DroneRunner
-from isaacgymenvs.learning.mappo.runner.shared.drone_runner import DroneRunner
+from isaacgymenvs.learning.mappo.runner.shared.drone_runner_coop import DroneRunner
+# from isaacgymenvs.learning.mappo.runner.shared.drone_runner import DroneRunner
 
 def create_envs(cfg) -> MultiAgentVecTask:
     task_config = cfg.task
@@ -44,13 +44,16 @@ def main(cfg):
         project=cfg.wandb_project,
         group=cfg.wandb_group,
         entity=cfg.wandb_entity,
+        config=OmegaConf.to_container(cfg, resolve=True),
         monitor_gym=True,
         name=run_name,
         resume="allow",
         mode=cfg.wandb_mode,
     )
 
-    wandb.run.config.update(OmegaConf.to_container(cfg, resolve=True))
+    # TODO: fix this...
+    # if not (cfg.resume_id and run.resumed):
+    #     wandb.run.config.update(, allow_val_change=True)
 
     envs: MultiAgentVecTask = create_envs(cfg)
     if cfg.capture_video:

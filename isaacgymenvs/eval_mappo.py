@@ -84,7 +84,7 @@ def main(cfg):
     }
     runner = DroneRunner(config)
     runner.restore()
-    runner.eval(cfg.eval_episodes, log=False)
+    runner.eval(cfg.eval_episodes, log=False, pbar=True)
         
 if __name__ == "__main__":
     main()

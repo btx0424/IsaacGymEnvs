@@ -773,6 +773,7 @@ class MultiAgentVecTask(VecTask):
         self.reward_space = spaces.Box(-np.inf, np.inf, shape=(self.num_rewards,))
 
         self.batch_size = torch.Size([self.num_envs,])
+        self.reset_callbacks = []
 
     def allocate_buffers(self):
         # allocate buffers
@@ -784,8 +785,10 @@ class MultiAgentVecTask(VecTask):
             (self.num_envs, self.num_agents, self.num_rewards), device=self.device, dtype=torch.float)
         self.cum_rew_buf = torch.zeros_like(self.rew_buf)
 
-        self.reset_buf = torch.ones(
+        self.reset_buf = torch.zeros(
             (self.num_envs, self.num_agents), device=self.device, dtype=torch.long)
+        self.done_buf = torch.zeros(
+            self.num_envs, device=self.device, dtype=torch.long)
         self.timeout_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
         self.progress_buf = torch.zeros(
@@ -827,8 +830,7 @@ class MultiAgentVecTask(VecTask):
             tensordict = policy(tensordict)
             tensordict = self.step(tensordict)
             tensordicts.append(tensordict.clone())
-            for agent, agent_td in tensordict.items():
-                step_tensordict(agent_td, keep_other=True)
+            tensordict = step_tensordict(tensordict, keep_other=True)
             
             if callback is not None:
                 callback(self, tensordict)
@@ -840,3 +842,23 @@ class MultiAgentVecTask(VecTask):
         if return_contiguous:
             out_td = out_td.contiguous()
         return out_td
+    
+    def td_step(self, tensordict: TensorDictBase) -> TensorDictBase:
+        self.pre_physics_step()
+        for i in range(self.control_freq_inv):
+            if self.force_render:
+                self.render()
+            self.gym.simulate(self.sim)
+        self.post_physics_step()
+        self.compute_reward_and_done()
+        self.compute_state_and_obs()
+        self.reset_done()
+
+    def on_reset(self, callback):
+        self.reset_callbacks.append(callback)
+
+    def reset_done(self):
+        env_ids = self.done_buf.nonzero(as_tuple=False).squeeze()
+        for callback in self.reset_callbacks:
+            callback(self, env_ids)
+    

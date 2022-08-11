@@ -400,7 +400,7 @@ class PredatorPrey(QuadrotorBase):
         self.captured_steps_buf[env_ids] = 0
     
     def create_obs_space_and_processor(self, obs_type=None) -> None:
-        num_obs = 13*self.num_predators + 13*self.num_preys + 13
+        num_obs = 6*self.num_boxes + 13*self.num_predators + 13*self.num_preys + 13
         ones = np.ones(num_obs)
         self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
         def obs_processor(tensordict: TensorDict) -> Dict[str, torch.Tensor]:
@@ -416,21 +416,25 @@ class PredatorPrey(QuadrotorBase):
             states_predators[..., :3] = states_predators[..., :3] - states_self[..., :3].unsqueeze(2) # (env, agent, agent, 3) - (env, agent, 1, 3)
             states_predators = states_predators.reshape(self.num_envs, self.num_agents, -1)
 
+            states_box = self.box_states.repeat(self.num_envs, self.num_agents, 1, 1)
+            states_box[..., :3] = states_box[..., :3] - states_self[..., :3].unsqueeze(2)
+            states_box = states_box.reshape(self.num_envs, self.num_agents, -1)
+            obs_tensor.append(states_box)
             obs_tensor.append(states_predators)
             obs_tensor.append(states_prey)
             obs_tensor.append(states_self)
-            
+            tensordict["obs"] = tensordict["state"] = torch.cat(obs_tensor, dim=-1)
             return tensordict
-        self.obs_split = [(1, 13), (self.num_predators, 13), (1, 13)]
+        self.obs_split = [(self.num_boxes, 6), (1, 13), (self.num_predators, 13), (1, 13)]
         self.obs_processor = obs_processor
         self.state_space = self.obs_space
 
     def agents_step(self, action_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
         actions = torch.concat([action_dict["predator"], action_dict["prey"]], dim=1)
-        obs_dict, reward, done, info = self.step(actions, flatten=False)
+        obs_dict, reward, done, info = super().agents_step(actions)
         return {
-            "predator": ({k: v[:, :-1] for k, v in obs_dict.items()}, reward[:, :-1], done[:, :-1]),
-            "prey": ({k: v[:, [-1]] for k, v in obs_dict.items()}, reward[:, [-1]], done[:, [-1]])
+            "predator": (obs_dict[:, self.predator_index], reward[:, :-1], done[:, :-1]),
+            "prey": (obs_dict[:, self.prey_index], reward[:, [-1]], done[:, [-1]])
             }, info
     
     def step(self, tensordict: TensorDictBase) -> TensorDictBase:
@@ -438,7 +442,12 @@ class PredatorPrey(QuadrotorBase):
         return super().step(tensordict)
 
     def reset(self) -> TensorDictBase:
+        self.task_config = self.extras["task_config"] = TensorDict({
+            "spawn_pos_idx": torch.zeros(self.num_envs, self.num_agents, dtype=int, device=self.device),
+        }, batch_size=self.num_envs)
+
         tensordict = super().reset()
+        
         return TensorDict({
             "predator": tensordict[:, self.predator_index],
             "prey": tensordict[:, self.prey_index]
@@ -461,16 +470,18 @@ class PredatorPrey(QuadrotorBase):
         self.rew_buf[:, -1, 0] = -distance_reward
 
         self.rew_buf[..., 1] = -collision_penalty
-
+        self.rew_buf[self.quadrotor_pos[..., 2]>self.MAX_XYZ[2], 1] -= 1
+        self.rew_buf[..., 1] *= 2
+        
         self.rew_buf[:, :-1, 2] = captured.float().unsqueeze(-1) / self.num_predators
         self.rew_buf[:, -1, 2] = -captured.float()
         
         self.cum_rew_buf.add_(self.rew_buf)
         
         self.reset_buf.zero_()
-        self.reset_buf[(distance > 3).all(-1)] = 1
-        self.reset_buf[self.quadrotor_pos[..., 2] < 0.1] = 1
-        self.reset_buf[self.quadrotor_pos[..., 2] > self.MAX_XYZ[2]] = 1
+        # self.reset_buf[(distance > 3).all(-1)] = 1
+        # self.reset_buf[self.quadrotor_pos[..., 2] < 0.1] = 1
+        # self.reset_buf[self.quadrotor_pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
 
         cum_rew_buf = self.cum_rew_buf.clone()
@@ -491,6 +502,16 @@ class PredatorPrey(QuadrotorBase):
             self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
         super().post_physics_step()
     
+    def reset_actors(self, env_ids):
+        env_states = self.root_states[env_ids].contiguous()
+        env_positions = env_states[..., :3]
+        randperm = torch.randperm(len(self.grid_avail), device=self.device)
+        num_samples = len(env_positions)*self.num_agents
+        sample_idx = randperm[torch.arange(num_samples).reshape(len(env_positions), self.num_agents)%len(self.grid_avail)]
+        env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
+    
+        self.task_config["spawn_pos_idx"][env_ids] = sample_idx
+
     @property
     def predator_pos(self) -> torch.Tensor:
         return self.root_positions[:, self.env_actor_index["drone"][self.predator_index]]
