@@ -43,7 +43,7 @@ from copy import deepcopy
 import sys
 
 import abc
-from abc import ABC
+from abc import ABC, abstractmethod
 from torchrl.data.tensordict.tensordict import TensorDictBase
 
 from torchrl.envs.utils import step_tensordict
@@ -754,7 +754,8 @@ class VecTask(Env):
 
         self.first_randomization = False
 
-class MultiAgentVecTask(VecTask):
+from torchrl.envs.vec_env import _BatchedEnv
+class MultiAgentVecTask(VecTask, _BatchedEnv):
 
     # gym version compatibility ...
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 24}
@@ -762,6 +763,7 @@ class MultiAgentVecTask(VecTask):
     
     def __init__(self, config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         self.num_rewards = config["env"].get("numRewards", 1)
+        self.reset_callbacks = []
         
         super().__init__(config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         
@@ -771,9 +773,7 @@ class MultiAgentVecTask(VecTask):
         self.act_space = spaces.Box(-ones, ones)
         
         self.reward_space = spaces.Box(-np.inf, np.inf, shape=(self.num_rewards,))
-
         self.batch_size = torch.Size([self.num_envs,])
-        self.reset_callbacks = []
 
     def allocate_buffers(self):
         # allocate buffers
@@ -781,22 +781,28 @@ class MultiAgentVecTask(VecTask):
             (self.num_envs, self.num_agents, self.num_obs), device=self.device, dtype=torch.float)
         self.states_buf = torch.zeros(
             (self.num_envs, self.num_agents, self.num_states), device=self.device, dtype=torch.float)
+        
         self.rew_buf = torch.zeros(
             (self.num_envs, self.num_agents, self.num_rewards), device=self.device, dtype=torch.float)
         self.cum_rew_buf = torch.zeros_like(self.rew_buf)
 
-        self.reset_buf = torch.zeros(
+        self.reset_buf = torch.ones(
             (self.num_envs, self.num_agents), device=self.device, dtype=torch.long)
-        self.done_buf = torch.zeros(
-            self.num_envs, device=self.device, dtype=torch.long)
+
         self.timeout_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
         self.progress_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
-        self.randomize_buf = torch.zeros(
-            self.num_envs, device=self.device, dtype=torch.long)
+
         self.extras = {}
-    
+
+        def _reset_buffers(_, env_ids):
+            self.progress_buf[env_ids] = 0
+            self.cum_rew_buf[env_ids] = 0
+            self.reset_buf[env_ids] = 0
+
+        self.on_reset(_reset_buffers)
+        
     def agents_step(self, 
             action_dict: Dict[str, torch.Tensor]
         ) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
@@ -843,22 +849,33 @@ class MultiAgentVecTask(VecTask):
             out_td = out_td.contiguous()
         return out_td
     
-    def td_step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        self.pre_physics_step()
+    def step(self, tensordict: TensorDictBase) -> TensorDictBase:
+        self.pre_physics_step(tensordict)
         for i in range(self.control_freq_inv):
             if self.force_render:
                 self.render()
             self.gym.simulate(self.sim)
         self.post_physics_step()
-        self.compute_reward_and_done()
-        self.compute_state_and_obs()
+        self.compute_reward_and_done(tensordict)
+        self.compute_state_and_obs(tensordict)
         self.reset_done()
 
-    def on_reset(self, callback):
+    def reset(self, tensordict: Optional[TensorDictBase] = None, execute_step: bool=True, **kwargs) -> TensorDictBase:
+        return super(_BatchedEnv, self).reset(tensordict, execute_step=execute_step, **kwargs)
+
+    @abstractmethod
+    def compute_reward_and_done(self, tensordict: TensorDictBase):
+        ...
+    
+    @abstractmethod
+    def compute_state_and_obs(self, tensordict: TensorDictBase):
+        ...
+
+    def on_reset(self, callback: Callable):
         self.reset_callbacks.append(callback)
 
     def reset_done(self):
-        env_ids = self.done_buf.nonzero(as_tuple=False).squeeze()
+        env_ids = self.reset_buf.all(-1).nonzero(as_tuple=False).squeeze()
         for callback in self.reset_callbacks:
             callback(self, env_ids)
     
