@@ -74,8 +74,8 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
         self.max_episode_length = self.cfg["env"]["maxEpisodeLength"]
 
         if self.viewer:
-            cam_pos = gymapi.Vec3(-2.3, 0, 4.2)
-            cam_target = gymapi.Vec3(0, 0, 0.1)
+            cam_pos = gymapi.Vec3(-2.3, 0, 7.2)
+            cam_target = gymapi.Vec3(1.5, 1.5, 1.)
             self.gym.viewer_camera_look_at(self.viewer, None, cam_pos, cam_target)
 
         self.controller = DSLPIDControl(n=self.num_envs * self.num_agents, sim_params=self.sim_params, kf=self.KF, device=self.device)
@@ -244,9 +244,9 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
 
     def pre_physics_step(self, actions: torch.Tensor):
         actions = actions.view(self.num_envs, self.num_agents, 4)
-        reset_env_ids = self.reset_buf.all(-1).nonzero(as_tuple=False).squeeze(-1)
-        if len(reset_env_ids) > 0:
-            self.reset_idx(reset_env_ids)
+        # reset_env_ids = self.reset_buf.all(-1).nonzero(as_tuple=False).squeeze(-1)
+        # if len(reset_env_ids) > 0:
+        #     self.reset_idx(reset_env_ids)
 
         rpms = torch.clamp(actions, 0, self.MAX_RPM)
         forces = rpms**2 * self.KF # (env, actor, 4)
@@ -273,6 +273,10 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
             "length": self.progress_buf.clone(),
         })
 
+        reset_env_ids = env_dones.nonzero(as_tuple=False).squeeze(-1)
+        if len(reset_env_ids) > 0:
+            self.reset_idx(reset_env_ids)
+        
         if self.viewer and self.viewer_lines:
             self.gym.clear_lines(self.viewer)
             for points, color in self.viewer_lines:
@@ -299,20 +303,20 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
         
         return obs_dict, reward, done, info
 
-    def step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        actions = tensordict["actions"]
-        actions = actions.view(self.num_envs, self.num_agents, -1)
-        actions = self.act_processor(actions)
+    # def step(self, tensordict: TensorDictBase) -> TensorDictBase:
+    #     actions = tensordict["actions"]
+    #     actions = actions.view(self.num_envs, self.num_agents, -1)
+    #     actions = self.act_processor(actions)
 
-        _, reward, done, _ = super().step(actions)
-        for agent in self.agents:
-            tensordict[agent]["next_obs"] = self.compute_obs_for(agent)
-        if self.state_space is not None:
-            tensordict["next_state"] = self.compute_state()
+    #     _, reward, done, _ = super().step(actions)
+    #     for agent in self.agents:
+    #         tensordict[agent]["next_obs"] = self.compute_obs_for(agent)
+    #     if self.state_space is not None:
+    #         tensordict["next_state"] = self.compute_state()
         
-        tensordict["reward"] = reward
-        tensordict["done"] = done
-        return tensordict
+    #     tensordict["reward"] = reward
+    #     tensordict["done"] = done
+    #     return tensordict
 
     def reset(self, tensordict: TensorDict=None, **kwargs) -> TensorDictBase:
         tensordict_reset = TensorDict({}, batch_size=(self.num_envs, self.num_agents))

@@ -37,7 +37,7 @@ graphics_device_id: ${cuda_id}
 params:
   # ppo
   num_steps: 64
-  num_mini_batch: 24
+  num_mini_batch: 16
   ppo_epoch: 5
   clip_param: 0.2
   entropy_coef: 0.01
@@ -47,7 +47,7 @@ params:
   attn_N: 1
   attn_heads: 4
   attn_size: 64
-  layer_N: 3
+  layer_N: 2
   hidden_size: 128
   lr: 0.0005
   critic_lr: 0.0005
@@ -63,8 +63,6 @@ params:
   cuda_deterministic: true
   data_chunk_length: 16
   dropout: 0.0
-  eval_episodes: 32
-  eval_interval: 25
   explored_ratio_threshold: 0.9
   gae_lambda: 0.95
   gain: 0.01

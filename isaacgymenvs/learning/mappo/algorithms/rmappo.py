@@ -150,20 +150,24 @@ class MAPPOPolicy:
     def cal_value_loss(self, value_normalizer, values, value_preds_batch, return_batch, active_masks_batch):
         value_pred_clipped = value_preds_batch + (values - value_preds_batch).clamp(-self.clip_param, self.clip_param)
         
-        if self._use_popart or self._use_valuenorm:
-            value_normalizer.update(return_batch)
-            error_clipped = value_normalizer.normalize(return_batch) - value_pred_clipped
-            error_original = value_normalizer.normalize(return_batch) - values
-        else:
-            error_clipped = return_batch - value_pred_clipped
-            error_original = return_batch - values
 
         if self._use_huber_loss:
+            if self._use_popart or self._use_valuenorm:
+                value_normalizer.update(return_batch)
+                error_clipped = value_normalizer.normalize(return_batch) - value_pred_clipped
+                error_original = value_normalizer.normalize(return_batch) - values
+            else:
+                error_clipped = return_batch - value_pred_clipped
+                error_original = return_batch - values
             value_loss_clipped = huber_loss(error_clipped, self.huber_delta)
             value_loss_original = huber_loss(error_original, self.huber_delta)
         else:
-            value_loss_clipped = mse_loss(error_clipped)
-            value_loss_original = mse_loss(error_original)
+            if self._use_popart or self._use_valuenorm:
+                value_loss_clipped = mse_loss(value_normalizer.normalize(return_batch), value_pred_clipped)
+                value_loss_original = mse_loss(value_normalizer.normalize(return_batch), values)
+            else:
+                value_loss_clipped = mse_loss(return_batch, value_pred_clipped)
+                value_loss_original = mse_loss(return_batch, values)
 
         if self._use_clipped_value_loss:
             value_loss = torch.max(value_loss_original, value_loss_clipped)
@@ -297,11 +301,11 @@ class MAPPOPolicy:
         self.actor.eval()
         self.critic.eval()
     
-    def get_initial_rnn_states(self, batch_size):
+    def get_initial_rnn_states(self, *batch_size):
         if self._use_recurrent_policy or self._use_naive_recurrent:
             return (
-                torch.zeros(batch_size, self.actor._recurrent_N, self.actor.hidden_size, device=self.device),
-                torch.zeros(batch_size, self.critic._recurrent_N, self.actor.hidden_size, device=self.device)
+                torch.zeros(self.actor._recurrent_N, *batch_size,  self.actor.hidden_size, device=self.device),
+                torch.zeros(self.critic._recurrent_N, *batch_size, self.actor.hidden_size, device=self.device)
             )
         else:
             return (None, None)

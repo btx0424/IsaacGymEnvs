@@ -1,0 +1,42 @@
+project: isaacgymenvs
+name: test_setting_max_vel
+program: train_mappo.py
+
+method: grid
+
+metric:
+  name: eval/success
+  goal: maximize
+
+parameters:
+  task.targetSpeed:
+    values: 
+      - [0, 4]
+  
+  task.env.maxLinearVelocity:
+    values: [3, 4, 5]
+
+  # params.num_mini_batch:
+  #   values: [16, 32]
+  # params.ppo_epoch:
+  #   values: [10, 16]
+  # seed:
+  #   values: [31, 54]
+
+  # max_env_steps:
+  #   values:
+  #     - 500_000_000
+
+  # capture_video:
+  #   values:
+  #     - True
+
+  wandb_name:
+    values:
+      - test_max_vel
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

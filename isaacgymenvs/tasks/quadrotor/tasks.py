@@ -142,8 +142,13 @@ class TargetEasy(QuadrotorBase):
         self.root_linvels[env_ids] = env_velocities
 
     def agents_step(self, action_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
-        obs_dict, reward, done, info = self.step(action_dict["predator"])
+        obs_dict, reward, done, info = super().agents_step(action_dict["predator"])
         return {"predator": (obs_dict, reward, done)}, info
+
+    def step(self, actions):
+        raise
+        obs_dict, reward, done, info = super().agents_step(actions)
+        return obs_dict["obs"], reward, done, info
 
     def reset(self) -> Dict[str, TensorDict]:
         obs_dict = super().reset()
@@ -266,7 +271,7 @@ class TargetHard(QuadrotorBase):
         self.cum_rew_buf.add_(self.rew_buf)
         
         self.reset_buf.zero_()
-        # self.reset_buf[(target_distance > 3).all(-1)] = 1
+        self.reset_buf[(target_distance > 3).all(-1)] = 1
         self.reset_buf[pos[..., 2] < 0.1] = 1
         self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
@@ -340,15 +345,19 @@ class TargetHard(QuadrotorBase):
         obs_dict, reward, done, info = super().agents_step(action_dict["predator"])
         return {"predator": (obs_dict, reward, done)}, info
     
-    def step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        tensordict["actions"] = tensordict["predator"]["actions"]
-        super().step(tensordict)
-        tensordict["predator"].update({
-            "next_obs": tensordict["obs"],
-            "reward": tensordict["reward"],
-            "done": tensordict["done"],
-        })
-        return tensordict
+    # def step(self, tensordict: TensorDictBase) -> TensorDictBase:
+    #     tensordict["actions"] = tensordict["predator"]["actions"]
+    #     super().step(tensordict)
+    #     tensordict["predator"].update({
+    #         "next_obs": tensordict["obs"],
+    #         "reward": tensordict["reward"],
+    #         "done": tensordict["done"],
+    #     })
+    #     return tensordict
+
+    def step(self, actions):
+        obs_dict, reward, done, info = super().agents_step(actions)
+        return obs_dict["obs"].squeeze(), reward.sum(-1).squeeze(), done.squeeze(), {}
 
     def reset(self) -> TensorDictBase:
         self.task_config = self.extras["task_config"] = TensorDict({
@@ -356,6 +365,7 @@ class TargetHard(QuadrotorBase):
             "target_speed": self.target_speeds
         }, batch_size=self.num_envs)
         obs_dict = super().reset()
+        # return obs_dict["obs"].squeeze()
         return TensorDict({"predator": obs_dict}, batch_size=self.num_envs)
     
     def set_tasks(self, 

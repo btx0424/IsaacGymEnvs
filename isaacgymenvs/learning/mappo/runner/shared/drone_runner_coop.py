@@ -130,7 +130,7 @@ class DroneRunner(Runner):
         obs_dict = self.envs.reset()
 
         rnn_states_dict = {
-            agent: policy.get_initial_rnn_states(self.num_envs*self.num_agents[agent])
+            agent: policy.get_initial_rnn_states(self.num_envs * self.num_agents[agent])
             for agent, policy in self.policies.items() if policy is not None
         }
         masks_dict = {
@@ -191,8 +191,8 @@ class DroneRunner(Runner):
                     with torch.no_grad():
                         assert not torch.isnan(agent_obs_dict["obs"]).any()
                         result_dict = policy.get_action_and_value(
-                            share_obs=agent_obs_dict["state"],
-                            obs=agent_obs_dict["obs"],
+                            share_obs=agent_obs_dict["state"].flatten(end_dim=1),
+                            obs=agent_obs_dict["obs"].flatten(end_dim=1),
                             rnn_states_actor=rnn_state_actor,
                             rnn_states_critic=rnn_state_critic,
                             masks=masks
@@ -295,7 +295,7 @@ class DroneRunner(Runner):
                 
                 _last_log = time.perf_counter()
 
-            if iteration % self.eval_interval == 0:
+            if self.eval_interval > 0 and iteration % self.eval_interval == 0:
                 self.training = False
                 self.eval(self.eval_episodes)
                 for agent, policy in self.policies.items():
@@ -312,12 +312,8 @@ class DroneRunner(Runner):
     def insert(self, data, buffer: SharedReplayBuffer = None):
         obs, rewards, dones, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
 
-        if rnn_states is not None:
-            rnn_states = rnn_states.reshape(self.num_envs, obs.size(1), *rnn_states.shape[1:])
-            rnn_states[dones] = 0
-        if rnn_states_critic is not None:
-            rnn_states_critic = rnn_states_critic.reshape(self.num_envs, obs.size(1), *rnn_states_critic.shape[1:])
-            rnn_states_critic[dones] = 0
+        if rnn_states is not None: rnn_states[:, dones] = 0
+        if rnn_states_critic is not None: rnn_states_critic[:, dones] = 0
 
         masks = torch.ones_like(dones)
         masks[dones] = 0
@@ -336,7 +332,7 @@ class DroneRunner(Runner):
             buffer = self.buffers.get(agent)
             next_values = policy.get_values(
                 buffer.share_obs[-1].flatten(end_dim=1),
-                buffer.rnn_states_critic[-1].flatten(end_dim=1),
+                buffer.rnn_states_critic[-1],
                 buffer.masks[-1].flatten(end_dim=1))
             next_values = next_values.reshape(self.num_envs, self.num_agents[agent], 1)
             buffer.compute_returns(next_values, policy.value_normalizer)
@@ -388,7 +384,7 @@ class DroneRunner(Runner):
             obs_dict = self.envs.reset()
 
             rnn_states_dict = {
-                agent: policy.get_initial_rnn_states(self.num_envs*self.num_agents[agent])
+                agent: policy.get_initial_rnn_states(self.num_envs * self.num_agents[agent])
                 for agent, policy in self.policies.items() if policy is not None
             }
             masks_dict = {
@@ -407,11 +403,11 @@ class DroneRunner(Runner):
                 role: {"obs": buffer.obs[buffer.step], "state": buffer.share_obs[buffer.step]} 
                 for role, buffer in self.buffers.items()}
             rnn_states_dict = {
-                role: (buffer.rnn_states[buffer.step].flatten(end_dim=1), buffer.rnn_states_critic[buffer.step].flatten(end_dim=1)) 
+                role: (buffer.rnn_states[buffer.step], buffer.rnn_states_critic[buffer.step]) 
                 for role, buffer in self.buffers.items()
             }
             masks_dict = {
-                role: buffer.masks[buffer.step]
+                role: buffer.masks[buffer.step].flatten(end_dim=1)
                 for role, buffer in self.buffers.items()
             }
 
@@ -443,8 +439,8 @@ class DroneRunner(Runner):
                     masks = masks_dict[agent]
                     with torch.no_grad():
                         result_dict = policy.get_action_and_value(
-                            share_obs=agent_obs_dict["state"],
-                            obs=agent_obs_dict["obs"],
+                            share_obs=agent_obs_dict["state"].flatten(end_dim=1),
+                            obs=agent_obs_dict["obs"].flatten(end_dim=1),
                             rnn_states_actor=rnn_state_actor,
                             rnn_states_critic=rnn_state_critic,
                             masks=masks
