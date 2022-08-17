@@ -143,6 +143,8 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
         asset_options.fix_base_link = True
         box_assets = {tuple(half_ext.tolist()): self.gym.create_box(self.sim, *half_ext, asset_options)
             for half_ext in set([box[3:] for box in self.box_states])}
+        # sphere
+        asset_options.max_linear_velocity=self.max_linear_velocity*1.5
         asset_options.fix_base_link = False
         asset_options.disable_gravity = True
         sphere_asset = self.gym.create_sphere(self.sim, 0.03, asset_options)
@@ -193,8 +195,12 @@ class QuadrotorBase(MultiAgentVecTask, _EnvClass):
             for i_target in range(self.num_targets):
                 sphere_handle = self.gym.create_actor(env, sphere_asset, sphere_pose, f"sphere_{i_target}", i_env, 1)
                 if i_env == 0:
+                    # actor_index
                     env_actor_index["target"].append(
                         self.gym.get_actor_index(env, sphere_handle, gymapi.DOMAIN_ENV))
+                    # body_index
+                    env_body_index["target"].append(
+                        self.gym.get_actor_rigid_body_index(env, sphere_handle, 0, gymapi.DOMAIN_ENV))
                 sim_actor_index["target"].append(self.gym.get_actor_index(env, sphere_handle, gymapi.DOMAIN_SIM))
 
             for i_box in range(self.num_boxes):

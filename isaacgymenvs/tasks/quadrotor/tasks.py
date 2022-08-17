@@ -1,7 +1,7 @@
 import torch
 import math
 import numpy as np
-from isaacgym import gymtorch
+from isaacgym import gymapi, gymtorch
 from gym import spaces
 from typing import Any, Callable, Dict, Sequence, Tuple
 
@@ -271,7 +271,7 @@ class TargetHard(QuadrotorBase):
         self.cum_rew_buf.add_(self.rew_buf)
         
         self.reset_buf.zero_()
-        self.reset_buf[(target_distance > 3).all(-1)] = 1
+        # self.reset_buf[(target_distance > 3).all(-1)] = 1
         self.reset_buf[pos[..., 2] < 0.1] = 1
         self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
@@ -293,16 +293,7 @@ class TargetHard(QuadrotorBase):
     def target_pos(self, pos: torch.Tensor):
         self.root_positions[:, self.env_actor_index["target"]] = pos
 
-    @property
-    def target_vel(self) -> torch.Tensor:
-        return self.root_linvels[:, self.env_actor_index["target"]]
-
-    @target_vel.setter
-    def target_vel(self, vel: torch.Tensor):
-        self.root_linvels[:, self.env_actor_index["target"]] = vel
-
     def pre_physics_step(self, actions: torch.torch.Tensor):
-        super().pre_physics_step(actions)
         
         # update targets
         target_pos = self.target_pos # (num_envs, num_targets, 3)
@@ -315,24 +306,52 @@ class TargetHard(QuadrotorBase):
         force_sources = torch.cat([quadrotor_pos, boundary_pos], dim=-2) # (num_envs, num_targets, num_agents+1, 3)
         d = target_pos.view(self.num_envs, self.num_targets, 1, 3) - force_sources
         distance = torch.norm(d, dim=-1, keepdim=True)
-        forces = d / (1e-7 + distance**2)
-        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds.view(-1, 1, 1)
-        
-        target_pos[..., 2].clamp_(0.2, self.MAX_XYZ[2]-0.2)
-        self.target_pos = target_pos # necessary?
-        self.target_vel = target_vel
+        forces = torch.mean(d / (1e-7 + distance**2), dim=-2) * 4
+        forces_magnitude = torch.norm(forces, dim=-1).clamp(min=1e-5)
+        # forces[forces_magnitude > 1] = normalize(forces[forces_magnitude > 1])
 
-        # apply
-        actor_reset_ids = self.sim_actor_index["target"].flatten()
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
-        
+        self.forces[..., self.env_body_index["target"], :] = forces
+
+        super().pre_physics_step(actions)
+
         # visualize if has viewer
         if self.viewer:
             quadrotor_pos = self.quadrotor_pos[0]
             target_pos = self.target_pos[0].expand_as(quadrotor_pos)
             points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
             self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
+    
+    def post_physics_step(self):
+        self.progress_buf += 1
+
+        self.refresh_tensors()
+
+        # clip targets' positions
+        target_pos = self.target_pos
+        target_pos[..., 2].clamp_(max=self.MAX_XYZ[2]-0.2)
+        self.target_pos = target_pos
+        actor_reset_ids = self.sim_actor_index["target"].flatten()
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
+
+        self.compute_reward_and_reset()
+        
+        env_dones = self.reset_buf.all(-1)
+        self.extras["env_dones"] = env_dones
+        self.extras["episode"].update({
+            "length": self.progress_buf.clone(),
+        })
+
+        reset_env_ids = env_dones.nonzero(as_tuple=False).squeeze(-1)
+        if len(reset_env_ids) > 0:
+            self.reset_idx(reset_env_ids)
+        
+        if self.viewer and self.viewer_lines:
+            self.gym.clear_lines(self.viewer)
+            for points, color in self.viewer_lines:
+                self.gym.add_lines(self.viewer, self.envs[0], len(points), points, color)
+            self.viewer_lines.clear()
+
 
     def reset_actors(self, env_ids):
         super().reset_actors(env_ids)
