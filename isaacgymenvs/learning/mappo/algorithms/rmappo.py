@@ -9,7 +9,7 @@ from torch.nn.functional import mse_loss
 import math
 from isaacgymenvs.learning.mappo.utils.valuenorm import ValueNorm
 from typing import Any, Dict, Tuple
-
+import time
 @dataclass
 class MAPPOPolicyConfig:
     pass
@@ -266,8 +266,8 @@ class MAPPOPolicy:
             else:
                 data_generator = buffer.feed_forward_generator(advantages, self.num_mini_batch)
 
-            for sample in data_generator:
-
+            for i, sample in enumerate(data_generator):
+                start = time.perf_counter()
                 value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, ratio \
                     = self.ppo_update(sample, turn_on)
 
@@ -283,6 +283,8 @@ class MAPPOPolicy:
                     train_info['critic_grad_norm'] += critic_grad_norm.item()
 
                 train_info['ratio'] += ratio.mean().item()
+                end = time.perf_counter()
+                print('PPO update {} time: {}'.format(i, end - start))
 
         num_updates = self.ppo_epoch * self.num_mini_batch
 

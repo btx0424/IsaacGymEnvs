@@ -38,16 +38,47 @@ class RunnerConfig:
 @dataclass
 class PPOConfig:
     num_steps: int = 16
-    num_mini_batch: int = 8
+    num_mini_batches: int = 8
+    ppo_epochs: int = 4
 
-class TensorDict(Dict[str, torch.Tensor]):
-    def reshape(self, *shape: int):
-        for key, value in self.items():
-            self[key] = value.reshape(*shape)
-        return self
+def collect(tensordict, condition, rename):
+    return {rename(k): v for k, v in tensordict.items() if condition(k)}
 
-    def flatten(self, start_dim: int = 0, end_dim: int = -1):
-        return TensorDict({key: value.flatten(start_dim, end_dim) for key, value in self.items()})
+def agent_forward(forward, agent_type, common_keys):
+    def _forward(tensordict):
+        agent_td = collect(tensordict, lambda k: k.endswith(agent_type) or k in common_keys, lambda k: k[:k.index("@")])
+        result_td = forward(agent_td)
+        result_td = collect(result_td, lambda k: k.endswith(agent_type) or k in common_keys, lambda k: k[:k.index("@")])
+        tensordict.update(result_td)
+        return tensordict
+    return _forward
+
+class Runner:
+    def __init__(self, 
+        cfg: RunnerConfig,
+        env: MultiAgentVecTask,
+    ) -> None:
+        self.cfg = cfg
+        self.env = env
+
+        self.policies = {}
+        for agent_type in self.env.agent_types:
+            self.policies[agent_type] = Policy(agent)
+        
+        def joint_policy(tensordict):
+            for agent_type, policy in self.policies.items():
+                tensordict.update(policy.forward(tensordict))
+            return tensordict
+        self.joint_policy = joint_policy
+        
+    def run(self) -> None:
+        max_iteration = self.cfg.max_iterations
+        tensordict = self.env.reset()
+        for iteration in range(max_iteration):
+            batch = self.env.rollout(tensordict)
+            for agent in self.env.agents:
+                if should_train()
+
 
 def collect_episode_infos(infos: Dict[str, List], tag: str) -> Dict:
     results = {}

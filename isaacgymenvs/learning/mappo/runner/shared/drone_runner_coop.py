@@ -116,6 +116,7 @@ class DroneRunner(Runner):
         # timers & counters
         self.env_step_time = 0
         self.inf_step_time = 0
+        self.train_time = 0
         
         self.total_env_steps = 0
         self.env_steps_this_run = 0
@@ -253,7 +254,10 @@ class DroneRunner(Runner):
             
             # compute return and update network
             self.compute()
+            _train_start = time.perf_counter()
             train_infos = self.train()
+            _train_end = time.perf_counter()
+            self.train_time += _train_end - _train_start
 
             self.total_env_steps += self.num_steps * self.num_envs
             self.env_steps_this_run += self.num_steps * self.num_envs
@@ -262,7 +266,7 @@ class DroneRunner(Runner):
             if iteration % self.log_interval == 0:
                 fps = (self.num_steps * self.num_envs * self.log_interval) / (time.perf_counter() - _last_log)
                 progress_str = f"iteration: {iteration}/{self.max_iterations}, env steps: {self.total_env_steps}, episodes: {self.total_episodes}"
-                performance_str = f"runtime: {self.env_step_time:.2f} (env), {self.inf_step_time:.2f} (inference), {time.perf_counter()-start:.2f} (total), fps: {fps:.2f}"
+                performance_str = f"runtime: {self.env_step_time:.2f} (env), {self.inf_step_time:.2f} (inference), {self.train_time:.2f} (train), {time.perf_counter()-start:.2f} (total), fps: {fps:.2f}"
                 
                 logging.info(progress_str)
                 logging.info(performance_str)
