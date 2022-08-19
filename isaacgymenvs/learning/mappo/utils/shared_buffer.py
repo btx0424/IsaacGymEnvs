@@ -9,10 +9,6 @@ from ..utils.util import check, get_shape_from_obs_space, get_shape_from_act_spa
 from gym import spaces
 
 
-def _cast(x: torch.Tensor):
-    return x.permute(1, 2, 0, 3).reshape(-1, *x.shape[3:])
-
-
 def create_buffer(space: spaces.Space, base_shape: Tuple[int, ...], device="cuda"):
     if isinstance(space, spaces.Dict):
         return {k: create_buffer(v) for k, v in space.items()}
@@ -113,6 +109,7 @@ class SharedReplayBuffer(object):
         self.value_preds[self.step] = value_preds
         self.rewards[self.step] = rewards
         self.masks[self.step + 1] = masks
+
         if bad_masks is not None:
             self.bad_masks[self.step + 1] = bad_masks
         if active_masks is not None:
@@ -351,7 +348,16 @@ class SharedReplayBuffer(object):
         B_ = T_ * B
         assert B_ % num_mini_batches == 0
 
-        start = time.perf_counter()
+        """
+        (T, num_envs, num_agents, *)
+        -> (T, B, *)
+        -> (T//chunk_length, chunk_len, B, *)
+        -> (chunk_len, T//chunk_len, B, *)
+        -> (chunk_len, T//chunk_len * B, *)
+        so that 
+        when indices is a `LongTensor` of length minibatch_size=T//chunk_len * B / num_minibatch,
+        tensor[:, indices] is of shape (chunk_len, minibatch_size, *)
+        """
         share_obs = self.share_obs[:-1].reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
         obs = self.obs[:-1].reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
         actions = self.actions.reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
@@ -359,18 +365,19 @@ class SharedReplayBuffer(object):
         value_preds = self.value_preds[:-1].reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
         returns = self.returns[:-1].reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
         masks = self.masks[:-1].reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
+
         active_masks = self.active_masks[:-1].reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
         if self.available_actions is not None:
             available_actions = self.available_actions[:-1].reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
         advantages = advantages.reshape(T_, chunk_length, B, -1).transpose(0, 1).reshape(chunk_length, B_, -1)
 
         # (T, num_layers, B, H) -> (T//chunk_len, chunk_len, num_layers, B, H) -> (chunk_len, num_layers, T//chunk_len * B, H)
-        rnn_states = self.rnn_states[:-1].reshape(T_, chunk_length, *self.rnn_states.shape[1:]).permute(1, 2, 0, 3, 4).reshape(chunk_length, self.recurrent_N, B_, self.hidden_size)
-        rnn_states_critic = self.rnn_states_critic[:-1].reshape(T_, chunk_length, *self.rnn_states_critic.shape[1:]).permute(1, 2, 0, 3, 4).reshape(chunk_length, self.recurrent_N, B_, self.hidden_size)
+        rnn_states = self.rnn_states[:-1].reshape(T_, chunk_length, *self.rnn_states.shape[1:])\
+            .permute(1, 2, 0, 3, 4).reshape(chunk_length, self.recurrent_N, B_, self.hidden_size)
+        rnn_states_critic = self.rnn_states_critic[:-1].reshape(T_, chunk_length, *self.rnn_states_critic.shape[1:])\
+            .permute(1, 2, 0, 3, 4).reshape(chunk_length, self.recurrent_N, B_, self.hidden_size)
 
         perm = torch.randperm(B_).reshape(num_mini_batches, -1)
-
-        print(f'prepare batch time: {time.perf_counter() - start}')
 
         for indices in perm:
             share_obs_batch = share_obs[:, indices]

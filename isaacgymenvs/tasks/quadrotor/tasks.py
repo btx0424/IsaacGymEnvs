@@ -277,8 +277,8 @@ class TargetHard(QuadrotorBase):
         
         self.reset_buf.zero_()
         # self.reset_buf[(target_distance > 3).all(-1)] = 1
-        self.reset_buf[pos[..., 2] < 0.1] = 1
-        self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
+        # self.reset_buf[pos[..., 2] < 0.1] = 1
+        # self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
 
         cum_rew_buf = self.cum_rew_buf.clone()

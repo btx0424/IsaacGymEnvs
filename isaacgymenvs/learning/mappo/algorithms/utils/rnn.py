@@ -46,8 +46,6 @@ class RNNLayer(nn.Module):
         # add t=0 and t=T to the list
         has_zeros = [0] + has_zeros + [T]
         outputs = []
-        if self.training:
-            print("has_zeros: ", len(has_zeros))
         for i in range(len(has_zeros) - 1):
             # We can now process steps that don't have any zeros in masks together!
             # This is much faster
@@ -58,6 +56,6 @@ class RNNLayer(nn.Module):
             outputs.append(rnn_scores)
 
         outputs = torch.cat(outputs, dim=0)
-        outputs = self.norm(outputs.view(T * N, -1)).view(T, N, -1)
+        # outputs = self.norm(outputs.view(T * N, -1)).view(T, N, -1)
 
         return outputs, hxs

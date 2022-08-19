@@ -117,7 +117,7 @@ class DroneRunner(Runner):
         self.env_step_time = 0
         self.inf_step_time = 0
         self.train_time = 0
-        
+
         self.total_env_steps = 0
         self.env_steps_this_run = 0
         self.total_episodes = 0
@@ -319,8 +319,7 @@ class DroneRunner(Runner):
         if rnn_states is not None: rnn_states[:, dones] = 0
         if rnn_states_critic is not None: rnn_states_critic[:, dones] = 0
 
-        masks = torch.ones_like(dones)
-        masks[dones] = 0
+        masks = (1.0 - dones)
 
         share_obs = obs
 
@@ -369,7 +368,7 @@ class DroneRunner(Runner):
 
     def restore(self, reset_steps=False):
         logging.info(f"Restoring models from {wandb.run.dir}")
-        checkpoint = torch.load(os.path.join(wandb.run.dir, "checkpoint.pt"))
+        checkpoint = torch.load(os.path.join(wandb.run.dir, "checkpoint.pt"), map_location=self.device)
         for agent, policy in self.policies.items():
             policy.actor.load_state_dict(checkpoint[agent]["actor"])
             policy.critic.load_state_dict(checkpoint[agent]["critic"])
