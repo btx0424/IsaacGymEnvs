@@ -55,7 +55,7 @@ class RNNLayer(nn.Module):
             rnn_scores, hxs = self.rnn(x[start_idx:end_idx], temp)
             outputs.append(rnn_scores)
 
-        outputs = torch.cat(outputs, dim=0)
-        # outputs = self.norm(outputs.view(T * N, -1)).view(T, N, -1)
+        outputs = x + torch.cat(outputs, dim=0)
+        outputs = self.norm(outputs.view(T * N, -1)).view(T, N, -1)
 
         return outputs, hxs

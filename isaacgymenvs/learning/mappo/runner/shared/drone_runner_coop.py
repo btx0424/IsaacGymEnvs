@@ -181,8 +181,6 @@ class DroneRunner(Runner):
                 action_dict = TensorDict()
                 action_log_prob_dict = TensorDict()
                 value_dict = TensorDict()
-                rnn_state_actor_dict = TensorDict()
-                rnn_state_critic_dict = TensorDict()
 
                 for agent, agent_obs_dict in obs_dict.items():
                     policy: MAPPOPolicy = self.policies[agent]
@@ -201,8 +199,7 @@ class DroneRunner(Runner):
                     action_dict[agent] = result_dict["action"]
                     action_log_prob_dict[agent] = result_dict["action_log_prob"]
                     value_dict[agent] = result_dict["value"]
-                    rnn_state_actor_dict[agent] = result_dict["rnn_state_actor"]
-                    rnn_state_critic_dict[agent] = result_dict["rnn_state_critic"]
+                    rnn_states_dict[agent] = (result_dict["rnn_state_actor"], result_dict["rnn_state_critic"])
 
                 _inf_end = time.perf_counter()
                 step_result_dict, infos = self.envs.agents_step(action_dict)
@@ -226,8 +223,8 @@ class DroneRunner(Runner):
                             value_dict[agent].reshape(self.num_envs, num_agents, 1),
                             action_dict[agent].reshape(self.num_envs, num_agents, -1),
                             action_log_prob_dict[agent].reshape(self.num_envs, num_agents, -1),
-                            rnn_state_actor_dict[agent],
-                            rnn_state_critic_dict[agent]
+                            rnn_states_dict[agent][0],
+                            rnn_states_dict[agent][1]
                         )
                         self.insert(data, buffer)
 

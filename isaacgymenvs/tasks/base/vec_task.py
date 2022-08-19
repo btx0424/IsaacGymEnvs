@@ -27,7 +27,7 @@
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import logging
-from typing import Callable, Dict, Any, Optional, Tuple
+from typing import Callable, Dict, Any, List, Optional, Tuple
 
 import gym
 from gym import spaces
@@ -43,7 +43,7 @@ from copy import deepcopy
 import sys
 
 import abc
-from abc import ABC
+from abc import ABC, abstractmethod
 from torchrl.data.tensordict.tensordict import TensorDictBase
 
 from torchrl.envs.utils import step_tensordict
@@ -760,6 +760,8 @@ class MultiAgentVecTask(VecTask):
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 24}
     render_mode = "rgb_array"
     
+    agent_types: List[str]
+    
     def __init__(self, config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         self.num_rewards = config["env"].get("numRewards", 1)
         
@@ -835,8 +837,8 @@ class MultiAgentVecTask(VecTask):
             if callback is not None:
                 callback(self, tensordict)
                 
-            steps += self.num_envs
-            episodes += tensordict["done"].sum()
+            steps += 1
+            episodes += tensordict["env_done"].sum()
         
         out_td = torch.stack(tensordicts)
         if return_contiguous:
@@ -854,11 +856,35 @@ class MultiAgentVecTask(VecTask):
         self.compute_state_and_obs()
         self.reset_done()
 
+    # def step(self, tensordict: TensorDictBase) -> TensorDictBase:
+    #     self.pre_physics_step(tensordict)
+    #     for i in range(self.control_freq_inv):
+    #         if self.force_render:
+    #             self.render()
+    #         self.gym.simulate(self.sim)
+    #     self.post_physics_step()
+    #     reward_and_done_td = self.compute_reward_and_done(tensordict)
+    #     self.reset_done()
+    #     state_and_obs_td = self.compute_state_and_obs(tensordict)
+    #     assert tensordict is not reward_and_done_td
+    #     assert tensordict is not state_and_obs_td
+    #     tensordict.update(reward_and_done_td)
+    #     tensordict.update(state_and_obs_td)
+        # return tensordict
+
+    # @abstractmethod
+    # def compute_reward_and_done(self, tensordict: TensorDictBase) -> TensorDictBase:
+    #     ...
+    
+    # @abstractmethod
+    # def compute_state_and_obs(self, tensordict: TensorDictBase) -> TensorDictBase:
+    #     ...
+
     def on_reset(self, callback):
         self.reset_callbacks.append(callback)
 
     def reset_done(self):
-        env_ids = self.done_buf.nonzero(as_tuple=False).squeeze()
+        env_ids = self.reset_buf.all(-1).nonzero(as_tuple=False).squeeze()
         for callback in self.reset_callbacks:
             callback(self, env_ids)
     
