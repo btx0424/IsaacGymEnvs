@@ -148,11 +148,13 @@ class DroneRunner(Runner):
                     share_obs=tensordict[f"obs@{agent_type}"].flatten(0, 1),
                     obs=tensordict[f"obs@{agent_type}"].flatten(0, 1),
                 )
-                tensordict[f"actions@{agent_type}"] = result_dict["action"].reshape(self.num_envs, -1)
-                tensordict[f"value@{agent_type}"] = result_dict["value"].reshape(self.num_envs, -1)
-                tensordict[f"action_log_prob@{agent_type}"] = result_dict["action_log_prob"].reshape(self.num_envs, -1)
+                tensordict[f"actions@{agent_type}"] = result_dict["action"].reshape(self.num_envs, self.num_agents[agent_type], -1)
+                tensordict[f"value@{agent_type}"] = result_dict["value"].reshape(self.num_envs, self.num_agents[agent_type], -1)
+                tensordict[f"action_log_prob@{agent_type}"] = result_dict["action_log_prob"].reshape(self.num_envs, self.num_agents[agent_type], -1)
             return tensordict
         
+        dummy_policy = self.envs.get_dummy_policy()
+
         episode_infos = defaultdict(list)
 
         def step_callback(env, tensordict, step):
@@ -386,11 +388,11 @@ class DroneRunner(Runner):
     
     def train(self) -> Dict[str, Any]:
         train_infos = {}
-        for agent, policy in self.policies.items():
-            if isinstance(policy, MAPPOPolicy):
-                buffer = self.buffers[agent]
+        for agent_type, policy in self.policies.items():
+            if agent_type == self.agents[0]:
+                buffer = self.buffers[agent_type]
                 policy.prep_training()
-                train_infos[agent] = policy.train(buffer)      
+                train_infos[agent_type] = policy.train(buffer)      
                 buffer.after_update()
         self.log_system()
         return train_infos

@@ -389,7 +389,7 @@ class PredatorPrey(QuadrotorBase):
         self.env_predator_index = self.env_actor_index["drone"][self.predator_index]
         self.env_prey_index = self.env_actor_index["drone"][self.prey_index]
         self.obs_split = [(self.num_boxes, 6), (self.num_preys, 13), (self.num_predators, 13), (1, 13)]
-        obs_split = np.cumsum([0] + [sum(s) for s in self.obs_split])
+        obs_split = np.cumsum([0] + [n*m for n, m in self.obs_split])
         self.obs_predator_index = slice(obs_split[2], obs_split[3])
         self.obs_prey_index = slice(obs_split[1], obs_split[2])
 
@@ -399,19 +399,17 @@ class PredatorPrey(QuadrotorBase):
         self.state_space = self.obs_space
 
         def reset_actors(_, env_ids):
-            env_states = self.root_states[env_ids].contiguous()
-            env_positions = env_states[..., :3]
             randperm = torch.randperm(len(self.grid_avail), device=self.device)
-            num_samples = len(env_positions)*self.num_agents
-            sample_idx = randperm[torch.arange(num_samples).reshape(len(env_positions), self.num_agents)%len(self.grid_avail)]
-            env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
+            num_samples = len(env_ids)*self.num_agents
+            sample_idx = randperm[torch.arange(num_samples).reshape(len(env_ids), self.num_agents)%len(self.grid_avail)]
+            self.root_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
         
-            self.task_config["spawn_pos_idx"][env_ids] = sample_idx
+            # self.task_config["spawn_pos_idx"][env_ids] = sample_idx
         self.on_reset(reset_actors)
 
     def allocate_buffers(self):
         super().allocate_buffers()
-        self.captured_steps_buf = torch.zeros(self.num_envs, device=self.device)
+        self.captured_steps_buf = torch.zeros(self.num_envs, self.num_preys, device=self.device)
         def reset_buffer(_, env_ids):
             self.captured_steps_buf[env_ids].zero_()
         
@@ -422,51 +420,52 @@ class PredatorPrey(QuadrotorBase):
         identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
         states_self = self.root_states[:, self.env_actor_index["drone"]]
 
-        states_prey = self.root_states[:, self.env_prey_index].unsqueeze(1).repeat(1, self.num_agents, 1)
-        states_prey[..., :3] = states_prey[..., :3] - states_self[..., :3]
-        states_prey = states_prey.reshape(self.num_envs, self.num_preys, 3)
+        states_prey = self.root_states[:, self.env_prey_index].unsqueeze(1).repeat(1, self.num_agents, 1, 1)
+        states_prey[..., :3] = states_prey[..., :3] - states_self[..., :3].unsqueeze(2)
+        states_prey = states_prey.reshape(self.num_envs, self.num_agents, -1)
 
         states_predator = self.root_states[:, self.env_predator_index].unsqueeze(1).repeat(1, self.num_agents, 1, 1)
         states_predator[..., :3] = states_predator[..., :3] - states_self[..., :3].unsqueeze(2) # (env, agent, agent, 3) - (env, agent, 1, 3)
-        states_predator = states_predator.reshape(self.num_envs, self.num_predators, -1)
+        states_predator = states_predator.reshape(self.num_envs, self.num_agents, -1)
 
         states_box = self.box_states.repeat(self.num_envs, self.num_agents, 1, 1)
         states_box[..., :3] = states_box[..., :3] - states_self[..., :3].unsqueeze(2)
         states_box = states_box.reshape(self.num_envs, self.num_agents, -1)
 
         obs_tensor.append(states_box)
-        obs_tensor.append(states_predator)
         obs_tensor.append(states_prey)
+        obs_tensor.append(states_predator)
         obs_tensor.append(states_self)
+        
         obs_tensor = torch.cat(obs_tensor, dim=-1)
 
         return {
-            "obs@predator": obs_tensor[:, self.predator_index],
-            "obs@prey": obs_tensor[:, self.prey_index],
+            "next_obs@predator": obs_tensor[:, self.predator_index],
+            "next_obs@prey": obs_tensor[:, self.prey_index],
         }
 
     def compute_reward_and_done(self, tensordict: TensorDictBase) -> TensorDictBase:
-        distance = torch.norm(self.predator_pos - self.prey_pos, dim=-1)
-        distance_min = torch.min(distance, dim=-1)
-        distance_reward = 1.0 / (1.0 + distance_min.values ** 2)
+        relative_pos = self.predator_pos - self.prey_pos
+        distance = torch.norm(relative_pos, dim=-1, keepdim=True)
+        distance_reward = 1.0 / (1.0 + distance ** 2) # (num_envs, num_predators)
 
         contact = self.contact_forces[:, self.env_body_index["base"]]
 
         collision_penalty = contact.any(-1).float()
 
-        captured: torch.Tensor = distance_min.values < self.capture_radius
+        captured: torch.Tensor = distance.min(1).values < self.capture_radius
         self.captured_steps_buf[~captured] = 0
         self.captured_steps_buf[captured] += 1
 
-        self.rew_buf[:, :-1, 0] = distance_reward.unsqueeze(-1) / self.num_predators
-        self.rew_buf[:, -1, 0] = -distance_reward
+        self.rew_buf[:, self.predator_index, 0] = distance_reward.mean(1)
+        self.rew_buf[:, self.prey_index, 0] = -distance_reward.sum(1)
 
         self.rew_buf[..., 1] = -collision_penalty
         self.rew_buf[self.quadrotor_pos[..., 2]>self.MAX_XYZ[2], 1] -= 1
         self.rew_buf[..., 1] *= 2
         
-        self.rew_buf[:, :-1, 2] = captured.float().unsqueeze(-1) / self.num_predators
-        self.rew_buf[:, -1, 2] = -captured.float()
+        self.rew_buf[:, self.predator_index, 2] = captured.float()
+        self.rew_buf[:, self.prey_index, 2] = -captured.float()
         
         self.cum_rew_buf.add_(self.rew_buf)
         
@@ -478,23 +477,41 @@ class PredatorPrey(QuadrotorBase):
 
         cum_rew_buf = self.cum_rew_buf.clone()
         self.extras["episode"].update({
-            "reward/distance": cum_rew_buf[..., 0],
-            "reward/collision": cum_rew_buf[..., 1],
-            "reward/capture": cum_rew_buf[..., 2],
-            
+            "reward/distance@predator": cum_rew_buf[..., self.predator_index, 0],
+            "reward/collision@predator": cum_rew_buf[..., self.predator_index, 1],
+            "reward/capture@predator": cum_rew_buf[..., self.predator_index, 2],
+
+            "reward/distance@prey": cum_rew_buf[..., self.prey_index, 0],
+            "reward/collision@prey": cum_rew_buf[..., self.prey_index, 1],
+            "reward/capture@prey": cum_rew_buf[..., self.prey_index, 2],
+
             "length": self.progress_buf + 1,
             "success": (self.captured_steps_buf > self.success_threshold).float(),
         })
+        return {
+            "reward@predator": self.rew_buf[:, self.predator_index],
+            "reward@prey": self.rew_buf[:, self.prey_index],
+            "done@predator": self.reset_buf[:, self.predator_index],
+            "done@prey": self.reset_buf[:, self.prey_index],
+            "env_done": self.reset_buf.all(-1),
+        }
 
     def step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        assert tensordict["action@predator"].shape[1] == self.num_predators
-        assert tensordict["action@prey"].shape[1] == self.num_preys
+        tensordict["actions@predator"] = tensordict["actions@predator"].reshape(self.num_envs, self.num_predators, -1)
+        tensordict["actions@prey"] = tensordict["actions@prey"].reshape(self.num_envs, self.num_preys, -1)
 
-        actions = torch.cat([tensordict["action@predator"], tensordict["action@prey"]], dim=1)
+        actions = torch.cat([tensordict["actions@predator"], tensordict["actions@prey"]], dim=1)
         step_result = super().step({"actions": actions})
-        step_result.del_("actions")
+        del step_result["actions"]
         tensordict.update(step_result)
         return tensordict
+
+    def pre_physics_step(self, tensordict: TensorDictBase):
+        super().pre_physics_step(tensordict)
+        if self.viewer:
+            points = torch.cat([self.predator_pos[0].unsqueeze(0).expand(self.num_preys, -1, -1), self.prey_pos[0].unsqueeze(1).expand(-1, self.num_predators, -1)], dim=-1).flatten(0, 1).cpu().numpy()
+
+            self.viewer_lines.append((points, [0.1, 0.2, 1]*len(points)))
 
     @property
     def predator_pos(self) -> torch.Tensor:
@@ -507,16 +524,17 @@ class PredatorPrey(QuadrotorBase):
     def get_dummy_policy(self, *args, **kwargs):
         def dummy_predator_policy(tensordict: TensorDict):
             prey_relative_pos = tensordict["obs@predator"][..., self.obs_prey_index].reshape(self.num_envs, self.num_predators, self.num_preys, 13)[..., :3]
-            distance = torch.norm(prey_relative_pos, dim=-1)
-            closest = torch.argmin(distance, dim=-1)
-            tensordict["action@predator"] = prey_relative_pos[:, :, closest, :]
+            distance = torch.norm(prey_relative_pos, dim=3, keepdim=True)
+            closest = torch.argmin(distance, dim=2, keepdim=True)
+
+            tensordict["actions@predator"] = prey_relative_pos[:, :, 0] # torch.take_along_dim(prey_relative_pos, closest, dim=2)
             tensordict["action_log_prob@predator"] = torch.ones(self.num_envs, self.num_predators, 1)
             tensordict["value@predator"] = torch.zeros(self.num_envs, self.num_predators, 1)
             return tensordict
 
         def dummy_prey_policy(tensordict: TensorDict):
             predator_relative_pos = tensordict["obs@prey"][..., self.obs_predator_index].reshape(self.num_envs, self.num_preys, self.num_predators, 13)[..., :3]
-            tensordict["action@prey"] = normalize(predator_relative_pos.mean(dim=-2))
+            tensordict["actions@prey"] = -normalize(predator_relative_pos.mean(dim=-2))
             tensordict["action_log_prob@prey"] = torch.ones(self.num_envs, self.num_preys, 1)
             tensordict["value@prey"] = torch.zeros(self.num_envs, self.num_preys, 1)
             return tensordict

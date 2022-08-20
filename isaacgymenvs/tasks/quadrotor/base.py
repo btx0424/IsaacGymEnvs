@@ -215,7 +215,7 @@ class QuadrotorBase(MultiAgentVecTask):
                 sim_actor_index["box"].append(self.gym.get_actor_index(env, box_handle, gymapi.DOMAIN_SIM))
             self.envs.append(env)
 
-        self.env_actor_index = {name: slice(index[0], index[-1]+1) for name, index in env_actor_index.items()}
+        self.env_actor_index = {name: torch.tensor(index) for name, index in env_actor_index.items()}
         self.env_body_index = {name: torch.tensor(index) for name, index in env_body_index.items()}
         self.bodies_per_env = self.gym.get_env_rigid_body_count(env)
         self.actors_per_env = self.gym.get_actor_count(env)
@@ -228,7 +228,7 @@ class QuadrotorBase(MultiAgentVecTask):
 
     def pre_physics_step(self, tensordict: TensorDictBase):
         rpms = self.act_processor(tensordict["actions"].reshape(-1)).view(self.num_envs, self.num_agents, 4)
-        tensordict.set("rpms", rpms)
+        tensordict["rpms"] = rpms
 
         rpms = torch.clamp(rpms, 0, self.MAX_RPM)
         forces = rpms**2 * self.KF # (env, actor, 4)
