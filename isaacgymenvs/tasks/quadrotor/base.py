@@ -83,15 +83,11 @@ class QuadrotorBase(MultiAgentVecTask):
         self.act_type = cfg["env"].get("actType", "pid_vel")
         self.create_act_space_and_processor(self.act_type)
 
-        def _reset_controllers_and_actors(_, env_ids):
+        def reset_controllers_and_actors(_, env_ids):
             self.controller.reset_idx(env_ids, self.num_envs)
             self.root_states[env_ids] = self.initial_root_states[env_ids]
-
-            root_reset_ids = self.sim_actor_index["__all__"][env_ids].flatten()
-            self.gym.set_actor_root_state_tensor_indexed(
-                self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
         
-        self.on_reset(_reset_controllers_and_actors)
+        self.on_reset(reset_controllers_and_actors)
         self.viewer_lines = []
 
     def create_sim(self):

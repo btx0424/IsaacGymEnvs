@@ -788,7 +788,7 @@ class MultiAgentVecTask(VecTask, _EnvClass):
             (self.num_envs, self.num_agents, self.num_rewards), device=self.device, dtype=torch.float)
         self.cum_rew_buf = torch.zeros_like(self.rew_buf)
 
-        self.reset_buf = torch.zeros(
+        self.reset_buf = torch.ones(
             (self.num_envs, self.num_agents), device=self.device, dtype=torch.long)
         self.done_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
@@ -889,4 +889,7 @@ class MultiAgentVecTask(VecTask, _EnvClass):
         if len(env_ids) > 0:
             for callback in self.reset_callbacks:
                 callback(self, env_ids)
+            root_reset_ids = self.sim_actor_index["__all__"][env_ids].flatten()
+            self.gym.set_actor_root_state_tensor_indexed(
+                self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
     

@@ -179,13 +179,13 @@ class TargetHard(QuadrotorBase):
             self.root_positions[env_ids, self.env_actor_index["target"]] = torch.tensor([0, 0, 0.5], device=self.device)
             self.root_linvels[env_ids, self.env_actor_index["target"]] = 0
 
+            randperm = torch.randperm(len(self.grid_avail), device=self.device)
+            num_samples = env_ids.numel() * self.num_agents
+            sample_idx = randperm[torch.arange(num_samples).reshape(len(env_ids), self.num_agents)%len(self.grid_avail)]
+            self.root_positions[env_ids, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
             if "spawn_pos" in self.task_spec:
-                randperm = torch.randperm(len(self.grid_avail), device=self.device)
-                num_samples = env_ids.numel() * self.num_agents
-                sample_idx = randperm[torch.arange(num_samples).reshape(len(env_ids), self.num_agents)%len(self.grid_avail)]
-                self.root_positions[env_ids, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
-            
                 self.task_config["spawn_pos_idx"][env_ids] = sample_idx
+
         self.on_reset(reset_actors)
 
         self.task_config = self.extras["task_config"] = TensorDict({
@@ -257,7 +257,8 @@ class TargetHard(QuadrotorBase):
             "reward_distance@predator": cum_reward[..., 0],
             "reward_collision@predator": cum_reward[..., 1],
             "reward_capture@predator": cum_reward[..., 2],
-            "success@predator": (self.captured_steps_buf > self.success_threshold).float()
+            "success@predator": (self.captured_steps_buf > self.success_threshold).float(),
+            "length": self.progress_buf.clone() + 1,
         })
 
         return TensorDict({
@@ -282,8 +283,8 @@ class TargetHard(QuadrotorBase):
         states_box = self.box_states.repeat(self.num_envs, self.num_agents, 1, 1)
         states_box[..., :3] = states_box[..., :3] - states_self[..., :3].unsqueeze(2)
         states_box = states_box.reshape(self.num_envs, self.num_agents, -1)
-        obs_tensor.append(states_box)
         obs_tensor.append(states_target)
+        obs_tensor.append(states_box)
         obs_tensor.append(states_all)
         obs_tensor.append(states_self)
         obs_tensor = torch.cat(obs_tensor, dim=-1)

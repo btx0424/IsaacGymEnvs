@@ -154,6 +154,13 @@ class DroneRunner(Runner):
                 tensordict[f"action_log_prob@{agent_type}"] = result_dict["action_log_prob"].reshape(self.num_envs, -1)
             return tensordict
         
+        def dummy_joint_policy(tensordict: TensorDict):
+            target_pos = tensordict["obs@predator"][..., :3]
+            tensordict["actions@predator"] = target_pos
+            tensordict["value@predator"] = torch.zeros(tensordict["obs@predator"].shape[:-1] + (1,), device=self.device)
+            tensordict["action_log_prob@predator"] = torch.zeros(tensordict["obs@predator"].shape[:-1] + (1,), device=self.device)
+            return tensordict
+
         episode_infos = defaultdict(list)
 
         def step_callback(env, tensordict, step):
@@ -183,13 +190,8 @@ class DroneRunner(Runner):
                     max_steps=self.num_steps, 
                     policy=joint_policy, 
                     callback=step_callback)
-            
-            train_infos = {}
-            for agent_type, policy in self.policies.items():
-                buffer = self.buffers[agent_type]
-                policy.prep_training()
-                train_infos[agent_type] = policy.train(buffer)      
-                buffer.after_update()
+            self.compute()
+            train_infos = self.train()
             iter_end = time.time()
 
             if iteration % self.log_interval == 0:
