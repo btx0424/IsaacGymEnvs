@@ -1,3 +1,4 @@
+from argparse import Namespace
 from collections import defaultdict
 from dataclasses import dataclass
 import logging
@@ -7,7 +8,10 @@ from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from isaacgymenvs.tasks.quadrotor import QuadrotorBase
 import numpy as np
 import torch
-from torchrl.data.tensordict.tensordict import TensorDictBase
+import torch.nn as nn
+from torchrl.data.tensordict.tensordict import TensorDict, TensorDictBase
+from torchrl.modules.distributions.continuous import NormalParamWrapper
+from torchrl.modules.models.models import MLP
 import wandb
 import os
 import random
@@ -15,6 +19,16 @@ from .base_runner import Runner
 
 from isaacgymenvs.learning.mappo.algorithms.rmappo import MAPPOPolicy
 from isaacgymenvs.learning.mappo.utils.shared_buffer import SharedReplayBuffer
+import torch.distributions as distributions
+
+from torchrl.modules import (
+    MLP,
+    ActorCriticWrapper,
+    NormalParamWrapper,
+    TanhNormal,
+    TruncatedNormal,
+    ValueOperator,
+)
 
 Agent = str
 
@@ -38,47 +52,11 @@ class RunnerConfig:
 @dataclass
 class PPOConfig:
     num_steps: int = 16
-    num_mini_batches: int = 8
+    num_minibatches: int = 8
     ppo_epochs: int = 4
 
-def collect(tensordict, condition, rename):
-    return {rename(k): v for k, v in tensordict.items() if condition(k)}
-
-def agent_forward(forward, agent_type, common_keys):
-    def _forward(tensordict):
-        agent_td = collect(tensordict, lambda k: k.endswith(agent_type) or k in common_keys, lambda k: k[:k.index("@")])
-        result_td = forward(agent_td)
-        result_td = collect(result_td, lambda k: k.endswith(agent_type) or k in common_keys, lambda k: k[:k.index("@")])
-        tensordict.update(result_td)
-        return tensordict
-    return _forward
-
-class Runner:
-    def __init__(self, 
-        cfg: RunnerConfig,
-        env: MultiAgentVecTask,
-    ) -> None:
-        self.cfg = cfg
-        self.env = env
-
-        self.policies = {}
-        for agent_type in self.env.agent_types:
-            self.policies[agent_type] = Policy(agent)
-        
-        def joint_policy(tensordict):
-            for agent_type, policy in self.policies.items():
-                tensordict.update(policy.forward(tensordict))
-            return tensordict
-        self.joint_policy = joint_policy
-        
-    def run(self) -> None:
-        max_iteration = self.cfg.max_iterations
-        tensordict = self.env.reset()
-        for iteration in range(max_iteration):
-            batch = self.env.rollout(tensordict)
-            for agent in self.env.agents:
-                if should_train()
-
+    actor_lr: float = 0.005
+    critic_lr: float = 0.005
 
 def collect_episode_infos(infos: Dict[str, List], tag: str) -> Dict:
     results = {}
@@ -91,6 +69,144 @@ def collect_episode_infos(infos: Dict[str, List], tag: str) -> Dict:
             results[f"{tag}/{k}"] = v.item()
         print(f"{tag}/{k}: {v}")
     return results
+
+from torchrl.modules.tensordict_module.sequence import TensorDictSequence
+from torchrl.modules.tensordict_module.common import TensorDictModule, TensorDictModuleWrapper
+from torchrl.modules.tensordict_module.actors import ActorCriticWrapper, ProbabilisticActor
+from torchrl.objectives.returns.advantages import GAE
+from torchrl.objectives.costs.ppo import ClipPPOLoss
+from torchrl.envs.utils import set_exploration_mode, step_tensordict
+from torch.profiler import profile, record_function, ProfilerActivity
+
+
+def generalized_advantage_estimate(
+    gamma: float,
+    lmbda: float,
+    state_value: torch.Tensor, # (num_steps, batch_size)
+    next_state_value: torch.Tensor, # (num_steps, batch_size)
+    reward: torch.Tensor,
+    done: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    not_done = 1 - done.to(next_state_value.dtype)
+    time_steps = not_done.shape[0]
+    advantage = torch.zeros_like(reward)
+    prev_advantage = 0
+
+    for t in reversed(range(time_steps)):
+        delta = (
+            reward[t]
+            + (gamma * next_state_value[t] * not_done[t])
+            - state_value[t]
+        )
+
+        prev_advantage = advantage[t] = delta + (
+            gamma * lmbda * prev_advantage * not_done[t]
+        )
+        
+    value_target = advantage + state_value
+
+    return advantage, value_target
+
+class Normal(distributions.Normal):
+
+    def log_prob(self, value):
+        return super().log_prob(value).sum(-1, keepdim=True)
+    
+    def entropy(self):
+        return super().entropy().sum(-1, keepdim=True)
+
+class FixedNormalParamWrapper(nn.Module):
+    def __init__(self, module: nn.Linear):
+        super().__init__()
+        self.module = module
+        self.log_std = nn.Parameter(torch.zeros(module.out_features))
+    
+    def forward(self, hidden):
+        loc = self.module(hidden)
+        return loc, torch.exp(self.log_std).expand_as(loc)
+    
+class ActorCriticPolicy(ActorCriticWrapper):
+    def __init__(self, obs_spec, act_spec, cfg: PPOConfig):
+        self.cfg = cfg
+        obs_dim = obs_spec.shape[0]
+        action_dim = act_spec.shape[0]
+
+        module_action = []
+        module_action.append(TensorDictModule(
+            MLP(in_features=obs_dim, out_features=256, num_cells=[256, 256]), 
+            in_keys=[f"obs"], out_keys=["hidden"]))
+        # module_action.append(TensorDictModule(
+        #     NormalParamWrapper(nn.Linear(256, action_dim*2)), 
+        #     in_keys=["hidden"], out_keys=["loc", "scale"]))
+        module_action.append(TensorDictModule(
+            FixedNormalParamWrapper(nn.Linear(256, action_dim)), 
+            in_keys=["hidden"], out_keys=["loc", "scale"]))
+        module_action = TensorDictSequence(*module_action)
+
+        policy_op = ProbabilisticActor(
+            module=module_action,
+            dist_param_keys=["loc", "scale"],
+            out_key_sample=[f"actions"],
+            # distribution_class=TanhNormal,
+            distribution_class=Normal,
+            return_log_prob=True,
+        )
+
+        module_value = []
+        module_value.append(
+            TensorDictModule(MLP(in_features=obs_dim, out_features=256, num_cells=[256, 256]), in_keys=["state"], out_keys=["hidden"]))
+        module_value.append(
+            TensorDictModule(nn.Linear(256, 1), in_keys=["hidden"], out_keys=["state_value"]))
+        value_op = TensorDictSequence(*module_value)
+        super().__init__(policy_op, value_op)
+
+        self.policy_opt = torch.optim.Adam(policy_op.parameters(), lr=cfg.actor_lr)
+        self.value_opt = torch.optim.Adam(value_op.parameters(), lr=cfg.critic_lr)
+
+    def forward(self, tensordict: TensorDictBase, tensordict_out=None, **kwargs) -> TensorDictBase:
+        result_td = super().forward(tensordict, tensordict_out, **kwargs)
+        result_td.del_("hidden")
+        result_td.del_("loc")
+        result_td.del_("scale")
+        return result_td
+
+    def update(self, batch: TensorDictBase) -> Dict:
+        batch["action"] = batch["actions"]
+        batch["reward"] = batch["reward"].sum(-1, keepdim=True)
+        with torch.no_grad():
+            last_state = TensorDict({"state": batch["next_state"][-1]}, batch_size=[])
+            last_state_value = self.get_value_operator()(last_state)["state_value"]
+            next_state_value = torch.cat([batch["state_value"][1:], last_state_value.unsqueeze(0)], dim=0)
+            batch["advantage"], batch["value_target"] = generalized_advantage_estimate(0.99, 0.95, batch["state_value"], next_state_value, batch["reward"], batch["done"])
+        train_info = {}
+        self.train()
+        for ppo_epoch in range(self.cfg.ppo_epochs):
+            for minibatch in self.make_dataset(batch, self.cfg.num_minibatches):
+                dist, *_ = self.get_policy_operator().get_dist(minibatch)
+                log_probs = dist.log_prob(minibatch["action"])
+                ratio = torch.exp(log_probs - minibatch["sample_log_prob"])
+                policy_loss = torch.clamp(ratio, 1 - self.cfg.clip_param, 1 + self.cfg.clip_param) * minibatch["advantage"]
+                policy_loss = torch.min(policy_loss, ratio * minibatch["advantage"])
+                self.policy_opt.zero_grad()
+                policy_loss.mean().backward()
+                self.policy_opt.step()
+
+                value = self.get_value_operator()(minibatch)["state_value"]
+                value_loss = nn.functional.mse_loss(value, minibatch["value_target"])
+                self.value_opt.zero_grad()
+                value_loss.backward()
+                self.value_opt.step()
+
+        train_info["reward"] = batch["reward"].detach().mean().item()
+        
+        return train_info
+    
+    def make_dataset(self, batch: TensorDictBase, num_minibatches: int):
+        # batch = batch.view(-1)
+        batch = {k: v.flatten(end_dim=1) for k, v in batch.items()}
+        perm = torch.randperm(batch["advantage"].shape[0]).reshape(num_minibatches, -1)
+        for indices in perm:
+            yield {k: v[indices] for k, v in batch.items()}
 
 class DroneRunner(Runner):
     def __init__(self, config):
@@ -118,7 +234,7 @@ class DroneRunner(Runner):
 
         super().__init__(config)
 
-        self.agents = self.envs.agents
+        self.agents = self.envs.agent_types
         if len(self.agents) > 1:
             self.num_agents = {
                 agent: getattr(self.envs, f"num_{agent}s") for agent in self.agents
@@ -129,22 +245,15 @@ class DroneRunner(Runner):
 
         envs: MultiAgentVecTask = config["envs"]
 
-        self.policies: Dict[str, MAPPOPolicy] = {}
-        self.buffers: Dict[str, SharedReplayBuffer] = {}
-        for agent in self.agents:
-            self.policies[agent] = MAPPOPolicy(
-                self.all_args,
-                envs.obs_space,
-                envs.state_space,
-                envs.act_space)
-            self.buffers[agent] = SharedReplayBuffer(
-                self.all_args,
-                self.num_envs,
-                self.num_agents[agent],
-                envs.obs_space,
-                envs.state_space,
-                envs.act_space)
-
+        self.policies: Dict[str, ActorCriticPolicy] = {}
+        for agent_type in self.agents:
+            self.policies[agent_type] = ActorCriticPolicy(
+                obs_spec=envs.observation_spec[f"obs@{agent_type}"],
+                act_spec=envs.action_spec,
+                cfg=Namespace(**cfg.params),
+            )
+            self.policies[agent_type].to(self.device)
+        
         # timers & counters
         self.env_step_time = 0
         self.inf_step_time = 0
@@ -161,30 +270,66 @@ class DroneRunner(Runner):
         self.training = True
         tensordict = self.envs.reset() # {agent:{obs}}
 
-        for agent, policy in self.policies.items():
-            if policy._use_recurrent_policy:
-                rnn_states_actor, rnn_states_critic = policy.get_initial_rnn_states(self.num_envs*self.num_agents[agent])
-                tensordict[agent].update({"rnn_states_actor": rnn_states_actor, "rnn_states_critic": rnn_states_critic})
-            tensordict[agent].update({"masks": torch.ones((self.num_envs, self.num_agents[agent], 1), device=self.device)})
-
-        def agent_policy(tensordict: TensorDictBase) -> TensorDictBase:
-            with torch.no_grad():
-                for agent, agent_td in tensordict.items():
-                    _policy = self.policies[agent]
-                    _policy.prep_rollout()
-                    _policy(agent_td, compute_values=True)
-                    
-            # print(tensordict)
-            return tensordict
-
-        for iteration in range(self.max_iterations):
-            data = self.envs.rollout(max_steps=self.num_steps, tensordict=tensordict, policy=agent_policy)
-            print(data)
-            raise
-
-        return
+        common_keys = ["state", "next_state"]
 
         episode_infos = defaultdict(list)
+        
+        def joint_policy(tensordict: TensorDictBase) -> TensorDictBase:
+            for agent_type, policy in self.policies.items():
+                agent_td = tensordict.select(*common_keys)
+                agent_td.update({k[:k.index("@")]: v for k ,v in tensordict.items() if k.endswith(f"@{agent_type}")})
+                output_td = policy.forward(agent_td)
+                for k in list(output_td.keys()):
+                    if k not in common_keys:
+                        output_td.rename_key(k, f"{k}@{agent_type}")
+                tensordict.update(output_td)    
+            return tensordict        
+        
+        replay_buffer = {}
+        for agent_type in self.agents:
+            replay_buffer[f"obs@{agent_type}"] = torch.zeros(self.num_steps, self.num_envs, self.num_agents[agent_type], *self.envs.observation_spec[f"obs@{agent_type}"].shape, device=self.device)
+            # replay_buffer[f"next_obs@{agent_type}"] = torch.zeros(self.num_steps, self.num_envs, self.num_agents[agent_type], *self.envs.observation_spec[f"obs@{agent_type}"].shape, device=self.device)
+            replay_buffer[f"actions@{agent_type}"] = torch.zeros(self.num_steps, self.num_envs, self.num_agents[agent_type], *self.envs.action_spec.shape, device=self.device)
+            replay_buffer[f"reward@{agent_type}"] = torch.zeros(self.num_steps, self.num_envs, self.num_agents[agent_type], 3, device=self.device)
+            replay_buffer[f"done@{agent_type}"] = torch.zeros(self.num_steps, self.num_envs, self.num_agents[agent_type], 1, device=self.device)
+            replay_buffer[f"sample_log_prob@{agent_type}"] = torch.zeros(self.num_steps, self.num_envs, self.num_agents[agent_type], 1, device=self.device)
+            replay_buffer[f"state_value@{agent_type}"] = torch.zeros(self.num_steps, self.num_envs, self.num_agents[agent_type], 1, device=self.device)
+        replay_buffer["state"] = torch.zeros_like(replay_buffer["obs@predator"], device=self.device)
+        replay_buffer["next_state"] = torch.zeros_like(replay_buffer["obs@predator"], device=self.device)
+        
+        def step_callback(env: MultiAgentVecTask, tensordict: TensorDictBase, step: int):  
+            for k, v in replay_buffer.items():
+                v[step] = tensordict[k]
+
+            env_done = tensordict["env_done"].squeeze(-1)
+            if env_done.any():
+                for k, v in env.extras["episode"][env_done].items():
+                    episode_infos[k].extend(v.tolist())
+
+        for iteration in range(self.max_iterations):
+            iter_start = time.time()
+            for agent_type, policy in self.policies.items():
+                policy.eval()
+            with torch.no_grad(), set_exploration_mode("random"):
+                tensordict = self.envs.rollout(max_steps=self.num_steps, policy=joint_policy, tensordict=tensordict, callback=step_callback)
+            
+            batch = replay_buffer
+            for agent_type, policy in self.policies.items():
+                agent_batch = {}
+                agent_batch.update({k[:k.index("@")]: v.flatten(1, 2) for k, v in batch.items() if k.endswith(f"@{agent_type}")})
+                agent_batch.update({k: v.flatten(1, 2) for k, v in batch.items() if k in common_keys})
+                
+                agent_train_info = policy.update(agent_batch)
+
+            iter_end = time.time()
+            if iteration % self.log_interval == 0:
+                logging.info(f"FPS: {self.num_envs*self.num_steps/(iter_end-iter_start)}")
+                collect_episode_infos(episode_infos, "train")
+                episode_infos.clear()
+            self.total_env_steps += self.num_steps * self.num_envs
+        
+        raise
+
         distributions = defaultdict(list)
         metric = "success"
         if "best_" + metric not in wandb.run.summary.keys():
@@ -554,38 +699,38 @@ class DroneRunner(Runner):
         if log:
             self.log(eval_infos)
 
-class TaskDist:
-    def __init__(self, capacity: int=1000, easy_threshold: float=400, hard_threshold:float=200) -> None:
-        self.capacity = capacity
-        self.task_config = None
-        self.metrics = None
-        self.easy_threshold = easy_threshold
-        self.hard_threshold = hard_threshold
+# class TaskDist:
+#     def __init__(self, capacity: int=1000, easy_threshold: float=400, hard_threshold:float=200) -> None:
+#         self.capacity = capacity
+#         self.task_config = None
+#         self.metrics = None
+#         self.easy_threshold = easy_threshold
+#         self.hard_threshold = hard_threshold
     
-    def add(self, task_config: TensorDict, metrics: torch.Tensor) -> None:
-        if self.task_config is None:
-            self.task_config = task_config
-        else:
-            self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
-        if self.metrics is None:
-            self.metrics = metrics[-self.capacity:]
-        else:
-            self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
+#     def add(self, task_config: TensorDict, metrics: torch.Tensor) -> None:
+#         if self.task_config is None:
+#             self.task_config = task_config
+#         else:
+#             self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
+#         if self.metrics is None:
+#             self.metrics = metrics[-self.capacity:]
+#         else:
+#             self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
     
-    def sample(self, n: int, mode: str="easy") -> Union[TensorDict, None]:
-        if mode == "easy":
-            task_config = self.task_config[self.metrics>=self.easy_threshold]
-        elif mode == "hard":
-            task_config = self.task_config[self.metrics<self.hard_threshold]
-        elif mode == "medium":
-            task_config = self.task_config[(self.metrics>=self.hard_threshold) & (self.metrics<self.easy_threshold)]
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
+#     def sample(self, n: int, mode: str="easy") -> Union[TensorDict, None]:
+#         if mode == "easy":
+#             task_config = self.task_config[self.metrics>=self.easy_threshold]
+#         elif mode == "hard":
+#             task_config = self.task_config[self.metrics<self.hard_threshold]
+#         elif mode == "medium":
+#             task_config = self.task_config[(self.metrics>=self.hard_threshold) & (self.metrics<self.easy_threshold)]
+#         else:
+#             raise ValueError(f"Unknown mode: {mode}")
 
-        if task_config.batch_size[0] > 0:
-            return task_config[torch.randint(0, task_config.batch_size[0], (n,))]
-        else:
-            return None
+#         if task_config.batch_size[0] > 0:
+#             return task_config[torch.randint(0, task_config.batch_size[0], (n,))]
+#         else:
+#             return None
         
-    def __len__(self) -> int:
-        return 0 if self.metrics is None else len(self.metrics)
+#     def __len__(self) -> int:
+#         return 0 if self.metrics is None else len(self.metrics)

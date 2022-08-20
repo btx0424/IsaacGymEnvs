@@ -339,12 +339,12 @@ class DroneRunner(Runner):
     
     def train(self) -> Dict[str, Any]:
         train_infos = {}
-        for agent, policy in self.policies.items():
-            if isinstance(policy, MAPPOPolicy):
-                buffer = self.buffers[agent]
-                policy.prep_training()
-                train_infos[agent] = policy.train(buffer)      
-                buffer.after_update()
+        # for agent, policy in self.policies.items():
+        #     if isinstance(policy, MAPPOPolicy):
+        #         buffer = self.buffers[agent]
+        #         policy.prep_training()
+        #         train_infos[agent] = policy.train(buffer)      
+        #         buffer.after_update()
         self.log_system()
         return train_infos
 

@@ -1,16 +1,21 @@
 import torch
 import math
 import numpy as np
+import logging
 from isaacgym import gymapi, gymtorch
 from gym import spaces
 from typing import Any, Callable, Dict, Sequence, Tuple
 
 from torchrl.data.tensordict.tensordict import TensorDictBase
+from torchrl.data import TensorDict, CompositeSpec, NdBoundedTensorSpec, NdUnboundedContinuousTensorSpec
+
 from .base import QuadrotorBase
-from torchrl.data import TensorDict
 
 def normalize(x: torch.Tensor) -> torch.Tensor:
     return x / (1e-7 + x.norm(dim=-1, keepdim=True))
+
+def uniform(*size, low: float, high: float, device: torch.device) -> torch.Tensor:
+    return torch.rand(*size, device=device)*(high-low) + low
 
 class TargetEasy(QuadrotorBase):
     agents = ["predator"]
@@ -155,7 +160,7 @@ class TargetEasy(QuadrotorBase):
         return {"predator": obs_dict}
 
 class TargetHard(QuadrotorBase):
-    agents = ["predator"]
+    agent_types = ["predator"]
 
     def __init__(self, cfg, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         cfg["env"]["numRewards"] = 3 # [distance, collision, capture]
@@ -169,90 +174,56 @@ class TargetHard(QuadrotorBase):
         self.boundary_radius  = cfg.get("boundaryRadius", 2.5)
         assert self.boundary_radius > 1
         self.task_spec = cfg.get("taskSpec", ["target_speed"])
-        
-        def reset_targets(envs, env_ids, env_states):
-            env_positions = env_states[..., :3]
-            env_velocities = env_states[..., 7:10]
-            spacing = torch.linspace(0, self.max_episode_length, self.num_targets+1, device=self.device)[:-1]
-            rad = spacing / self.max_episode_length * math.pi*2
-            env_positions[:, self.env_actor_index["target"], 0] = torch.sin(rad)
-            env_positions[:, self.env_actor_index["target"], 1] = torch.cos(rad)
-            env_positions[:, self.env_actor_index["target"], 2] = 0.5
-            env_velocities[:, self.env_actor_index["target"]] = 0
-        
-        def reset_quadrotors(envs, env_ids, env_states):
+
+        def reset_actors(_, env_ids: torch.Tensor):
+            self.root_positions[env_ids, self.env_actor_index["target"]] = torch.tensor([0, 0, 0.5], device=self.device)
+            self.root_linvels[env_ids, self.env_actor_index["target"]] = 0
+
             if "spawn_pos" in self.task_spec:
-                env_positions = env_states[..., :3]
                 randperm = torch.randperm(len(self.grid_avail), device=self.device)
-                num_samples = len(env_positions)*self.num_agents
-                sample_idx = randperm[torch.arange(num_samples).reshape(len(env_positions), self.num_agents)%len(self.grid_avail)]
-                env_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
+                num_samples = env_ids.numel() * self.num_agents
+                sample_idx = randperm[torch.arange(num_samples).reshape(len(env_ids), self.num_agents)%len(self.grid_avail)]
+                self.root_positions[env_ids, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
             
                 self.task_config["spawn_pos_idx"][env_ids] = sample_idx
+        self.on_reset(reset_actors)
 
-        self.reset_callbacks = [reset_targets, reset_quadrotors]
+        self.task_config = self.extras["task_config"] = TensorDict({
+            "spawn_pos_idx": torch.zeros(self.num_envs, self.num_agents, dtype=int, device=self.device),
+            "target_speed": self.target_speeds
+        }, batch_size=self.num_envs)
+
         if isinstance(self.target_speed, Sequence):
             assert len(self.target_speed) == 2 and self.target_speed[0] <= self.target_speed[1], "Invalid target speed range"
-            def sample_speed(envs, env_ids, env_states):
-                self.target_speeds[env_ids] = \
-                    torch.rand(len(env_ids), device=self.device) * (self.target_speed[1] - self.target_speed[0]) + self.target_speed[0]
-                if "target_speed" in self.task_spec:
-                    # no need to manually uppdate
-                    # the tensordict task_config holds self.target_speeds
-                    # self.task_config["target_speed"][env_ids] = self.target_speeds[env_ids]
-                    pass
+            logging.info(f"Sample target speed from range: {self.target_speed}")
+            def sample_speed(_, env_ids):
+                self.target_speeds[env_ids] = uniform(len(env_ids), self.target_speed[0], self.target_speed[1], self.device)
             self.reset_callbacks.append(sample_speed)
         else:
             self.target_speeds *= self.target_speed
-
-    def allocate_buffers(self):
-        super().allocate_buffers()
-
-        self.captured_steps_buf = torch.zeros(self.num_envs, device=self.device)
-        self.target_distance_buf = torch.zeros(
-            (self.num_envs, self.num_agents), device=self.device)
-
-    def reset_buffers(self, env_ids):
-        super().reset_buffers(env_ids)
-        self.target_distance_buf[env_ids] = 0
-        self.captured_steps_buf[env_ids] = 0
         
-    def create_obs_space_and_processor(self, obs_type=None) -> None:
         num_obs = 6*self.num_boxes + 13*self.num_agents + 13 + 13
         ones = np.ones(num_obs)
         self.obs_space = spaces.Box(-ones*np.inf, ones*np.inf)
-        def obs_processor(obs_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-            obs_tensor = []
-            identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
-            states_self = self.root_states[:, self.env_actor_index["drone"]]
-
-            states_target = self.root_states[:, self.env_actor_index["target"][0]].unsqueeze(1).repeat(1, self.num_agents, 1)
-            states_target[..., :3] = states_target[..., :3] - states_self[..., :3]
-            assert states_target.shape == states_self.shape
-
-            states_all = states_self.unsqueeze(1).repeat(1, self.num_agents, 1, 1)
-            states_all[..., :3] = states_all[..., :3] - states_self[..., :3].unsqueeze(2) # (env, agent, agent, 3) - (env, agent, 1, 3)
-            states_all = states_all.reshape(self.num_envs, self.num_agents, -1)
-
-            states_box = self.box_states.repeat(self.num_envs, self.num_agents, 1, 1)
-            states_box[..., :3] = states_box[..., :3] - states_self[..., :3].unsqueeze(2)
-            states_box = states_box.reshape(self.num_envs, self.num_agents, -1)
-            assert not torch.isnan(states_self).any()
-            assert not torch.isnan(states_box).any(), torch.isnan(states_box).nonzero()
-            assert not torch.isnan(states_all).any(), torch.isnan(states_all).nonzero()
-            assert not torch.isnan(states_target).any(), torch.isnan(states_target).nonzero()
-            assert not torch.isnan(states_self).any(), torch.isnan(states_self).nonzero()
-            obs_tensor.append(states_box)
-            obs_tensor.append(states_target)
-            obs_tensor.append(states_all)
-            obs_tensor.append(states_self)
-            obs_dict["state"] = obs_dict["obs"] = torch.cat(obs_tensor, dim=-1)
-            return obs_dict
         self.obs_split = [(self.num_boxes, 6), (1, 13), (self.num_agents, 13), (1, 13)]
-        self.obs_processor = obs_processor
-        self.state_space = self.obs_space
+        self.observation_spec = CompositeSpec(**{
+            "obs@predator": NdUnboundedContinuousTensorSpec((num_obs,), device=self.device),
+            "state": NdUnboundedContinuousTensorSpec((num_obs,), device=self.device)
+        }) 
+        self.action_spec = NdBoundedTensorSpec(-1, 1, (3,), device=self.device)
+
+    def allocate_buffers(self):
+        super().allocate_buffers()
+        self.captured_steps_buf = torch.zeros(self.num_envs, device=self.device)
+        self.target_distance_buf = torch.zeros(
+            (self.num_envs, self.num_agents), device=self.device)
+        
+        def reset_buffers(_, env_ids):
+            self.captured_steps_buf[env_ids] = 0
+            self.target_distance_buf[env_ids] = 0
+        self.on_reset(reset_buffers)
     
-    def compute_reward_and_reset(self):
+    def compute_reward_and_done(self, tensordict: TensorDictBase):
         pos, quat, vel, angvel = self.quadrotor_states.values()
             
         contact = self.contact_forces[:, self.env_body_index["base"]]
@@ -277,18 +248,56 @@ class TargetHard(QuadrotorBase):
         
         self.reset_buf.zero_()
         # self.reset_buf[(target_distance > 3).all(-1)] = 1
-        # self.reset_buf[pos[..., 2] < 0.1] = 1
-        # self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
+        self.reset_buf[pos[..., 2] < 0.1] = 1
+        self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
 
-        cum_rew_buf = self.cum_rew_buf.clone()
+        cum_reward = self.cum_rew_buf.clone()
         self.extras["episode"].update({
-            "reward_distance": cum_rew_buf[..., 0],
-            "reward_collision": cum_rew_buf[..., 1],
-            "reward_capture": cum_rew_buf[..., 2],
-            
-            "success": (self.captured_steps_buf > self.success_threshold).float(),
+            "reward_distance@predator": cum_reward[..., 0],
+            "reward_collision@predator": cum_reward[..., 1],
+            "reward_capture@predator": cum_reward[..., 2],
+            "success@predator": (self.captured_steps_buf > self.success_threshold).float()
         })
+
+        return TensorDict({
+            "reward@predator": self.rew_buf, 
+            "done@predator": self.reset_buf.clone().unsqueeze(-1),
+            "env_done": self.reset_buf.all(-1)
+        }, batch_size=self.batch_size)
+    
+    def compute_state_and_obs(self, tensordict: TensorDictBase):
+        obs_tensor = []
+        identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
+        states_self = self.root_states[:, self.env_actor_index["drone"]]
+
+        states_target = self.root_states[:, self.env_actor_index["target"]].repeat(1, self.num_agents, 1)
+        states_target[..., :3] = states_target[..., :3] - states_self[..., :3]
+        assert states_target.shape == states_self.shape
+
+        states_all = states_self.unsqueeze(1).repeat(1, self.num_agents, 1, 1)
+        states_all[..., :3] = states_all[..., :3] - states_self[..., :3].unsqueeze(2) # (env, agent, agent, 3) - (env, agent, 1, 3)
+        states_all = states_all.reshape(self.num_envs, self.num_agents, -1)
+
+        states_box = self.box_states.repeat(self.num_envs, self.num_agents, 1, 1)
+        states_box[..., :3] = states_box[..., :3] - states_self[..., :3].unsqueeze(2)
+        states_box = states_box.reshape(self.num_envs, self.num_agents, -1)
+        obs_tensor.append(states_box)
+        obs_tensor.append(states_target)
+        obs_tensor.append(states_all)
+        obs_tensor.append(states_self)
+        obs_tensor = torch.cat(obs_tensor, dim=-1)
+
+        return TensorDict({
+            "next_obs@predator": obs_tensor,
+            "next_state": obs_tensor,
+        }, batch_size=self.num_envs)
+              
+    def step(self, tensordict: TensorDictBase) -> TensorDictBase:
+        step_result = super().step(TensorDict({"actions": tensordict["actions@predator"]}, batch_size=self.num_envs))
+        step_result.del_("actions")
+        tensordict.update(step_result)
+        return tensordict
     
     @property
     def target_pos(self) -> torch.Tensor:
@@ -298,7 +307,16 @@ class TargetHard(QuadrotorBase):
     def target_pos(self, pos: torch.Tensor):
         self.root_positions[:, self.env_actor_index["target"]] = pos
 
+    @property
+    def target_vel(self) -> torch.Tensor:
+        return self.root_linvels[:, self.env_actor_index["target"]]
+
+    @target_vel.setter
+    def target_vel(self, vel: torch.Tensor):
+        self.root_linvels[:, self.env_actor_index["target"]] = vel
+
     def pre_physics_step(self, actions: torch.torch.Tensor):
+        super().pre_physics_step(actions)
         
         # update targets
         target_pos = self.target_pos # (num_envs, num_targets, 3)
@@ -311,86 +329,24 @@ class TargetHard(QuadrotorBase):
         force_sources = torch.cat([quadrotor_pos, boundary_pos], dim=-2) # (num_envs, num_targets, num_agents+1, 3)
         d = target_pos.view(self.num_envs, self.num_targets, 1, 3) - force_sources
         distance = torch.norm(d, dim=-1, keepdim=True)
-        forces = torch.mean(d / (1e-7 + distance**2), dim=-2) * 4
-        forces_magnitude = torch.norm(forces, dim=-1).clamp(min=1e-5)
-        # forces[forces_magnitude > 1] = normalize(forces[forces_magnitude > 1])
+        forces = d / (1e-7 + distance**2)
+        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds.view(-1, 1, 1)
+        
+        target_pos[..., 2].clamp_(0.2, self.MAX_XYZ[2]-0.2)
+        self.target_pos = target_pos # necessary?
+        self.target_vel = target_vel
 
-        self.forces[..., self.env_body_index["target"], :] = forces
-
-        super().pre_physics_step(actions)
-
+        # apply
+        actor_reset_ids = self.sim_actor_index["target"].flatten()
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
+        
         # visualize if has viewer
         if self.viewer:
             quadrotor_pos = self.quadrotor_pos[0]
             target_pos = self.target_pos[0].expand_as(quadrotor_pos)
             points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
             self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
-    
-    def post_physics_step(self):
-        self.progress_buf += 1
-
-        self.refresh_tensors()
-
-        # clip targets' positions
-        target_pos = self.target_pos
-        target_pos[..., 2].clamp_(max=self.MAX_XYZ[2]-0.2)
-        self.target_pos = target_pos
-        actor_reset_ids = self.sim_actor_index["target"].flatten()
-        self.gym.set_actor_root_state_tensor_indexed(
-            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
-
-        self.compute_reward_and_reset()
-        
-        env_dones = self.reset_buf.all(-1)
-        self.extras["env_dones"] = env_dones
-        self.extras["episode"].update({
-            "length": self.progress_buf.clone(),
-        })
-
-        reset_env_ids = env_dones.nonzero(as_tuple=False).squeeze(-1)
-        if len(reset_env_ids) > 0:
-            self.reset_idx(reset_env_ids)
-        
-        if self.viewer and self.viewer_lines:
-            self.gym.clear_lines(self.viewer)
-            for points, color in self.viewer_lines:
-                self.gym.add_lines(self.viewer, self.envs[0], len(points), points, color)
-            self.viewer_lines.clear()
-
-
-    def reset_actors(self, env_ids):
-        super().reset_actors(env_ids)
-        env_states = self.root_states[env_ids].contiguous()
-        for callback in self.reset_callbacks:
-            callback(self, env_ids, env_states)
-        self.root_states[env_ids] = env_states
-    
-    def agents_step(self, action_dict: Dict[str, torch.Tensor]) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
-        obs_dict, reward, done, info = super().agents_step(action_dict["predator"])
-        return {"predator": (obs_dict, reward, done)}, info
-    
-    # def step(self, tensordict: TensorDictBase) -> TensorDictBase:
-    #     tensordict["actions"] = tensordict["predator"]["actions"]
-    #     super().step(tensordict)
-    #     tensordict["predator"].update({
-    #         "next_obs": tensordict["obs"],
-    #         "reward": tensordict["reward"],
-    #         "done": tensordict["done"],
-    #     })
-    #     return tensordict
-
-    def step(self, actions):
-        obs_dict, reward, done, info = super().agents_step(actions)
-        return obs_dict["obs"].squeeze(), reward.sum(-1).squeeze(), done.squeeze(), {}
-
-    def reset(self) -> TensorDictBase:
-        self.task_config = self.extras["task_config"] = TensorDict({
-            "spawn_pos_idx": torch.zeros(self.num_envs, self.num_agents, dtype=int, device=self.device),
-            "target_speed": self.target_speeds
-        }, batch_size=self.num_envs)
-        obs_dict = super().reset()
-        # return obs_dict["obs"].squeeze()
-        return TensorDict({"predator": obs_dict}, batch_size=self.num_envs)
     
     def set_tasks(self, 
             env_ids: torch.Tensor, 

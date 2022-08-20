@@ -44,7 +44,7 @@ import sys
 
 import abc
 from abc import ABC, abstractmethod
-from torchrl.data.tensordict.tensordict import TensorDictBase
+from torchrl.data.tensordict.tensordict import TensorDictBase, TensorDict
 
 from torchrl.envs.utils import step_tensordict
 
@@ -754,7 +754,8 @@ class VecTask(Env):
 
         self.first_randomization = False
 
-class MultiAgentVecTask(VecTask):
+from torchrl.envs.common import _EnvClass
+class MultiAgentVecTask(VecTask, _EnvClass):
 
     # gym version compatibility ...
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 24}
@@ -764,6 +765,7 @@ class MultiAgentVecTask(VecTask):
     
     def __init__(self, config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         self.num_rewards = config["env"].get("numRewards", 1)
+        self.reset_callbacks = []
         
         super().__init__(config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         
@@ -775,7 +777,6 @@ class MultiAgentVecTask(VecTask):
         self.reward_space = spaces.Box(-np.inf, np.inf, shape=(self.num_rewards,))
 
         self.batch_size = torch.Size([self.num_envs,])
-        self.reset_callbacks = []
 
     def allocate_buffers(self):
         # allocate buffers
@@ -797,7 +798,14 @@ class MultiAgentVecTask(VecTask):
             self.num_envs, device=self.device, dtype=torch.long)
         self.randomize_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
-        self.extras = {}
+        self.extras = {"episode": TensorDict({}, batch_size=[self.num_envs,])}
+        
+        def reset_buffers(_, env_ids):
+            self.progress_buf[env_ids] = 0
+            self.cum_rew_buf[env_ids] = 0
+            self.reset_buf[env_ids] = 0
+
+        self.on_reset(reset_buffers)
     
     def agents_step(self, 
             action_dict: Dict[str, torch.Tensor]
@@ -813,7 +821,7 @@ class MultiAgentVecTask(VecTask):
         # break_when_any_done: bool = True,
         return_contiguous: bool = True,
         tensordict: Optional[TensorDictBase] = None,
-    ):
+    ) -> TensorDictBase:
         steps = 0
         episodes = 0
         if max_steps is not None and max_episodes is None:
@@ -827,64 +835,58 @@ class MultiAgentVecTask(VecTask):
             logging.warning("No tensordict provided as init obs, resetting env.")
             tensordict = self.reset()
         
-        tensordicts = []
         while not terminate():
             tensordict = policy(tensordict)
             tensordict = self.step(tensordict)
-            tensordicts.append(tensordict.clone())
+            if callback is not None:
+                callback(self, tensordict, steps)
             tensordict = step_tensordict(tensordict, keep_other=True)
             
-            if callback is not None:
-                callback(self, tensordict)
-                
             steps += 1
             episodes += tensordict["env_done"].sum()
         
-        out_td = torch.stack(tensordicts)
-        if return_contiguous:
-            out_td = out_td.contiguous()
-        return out_td
-    
-    def td_step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        self.pre_physics_step()
+        return tensordict
+
+    def step(self, tensordict: TensorDictBase) -> TensorDictBase:
+        self.pre_physics_step(tensordict)
         for i in range(self.control_freq_inv):
             if self.force_render:
                 self.render()
             self.gym.simulate(self.sim)
         self.post_physics_step()
-        self.compute_reward_and_done()
-        self.compute_state_and_obs()
+        reward_and_done_td = self.compute_reward_and_done(tensordict)
         self.reset_done()
+        state_and_obs_td = self.compute_state_and_obs(tensordict)
+        assert tensordict is not reward_and_done_td
+        assert tensordict is not state_and_obs_td
+        tensordict.update(reward_and_done_td)
+        tensordict.update(state_and_obs_td)
+        return tensordict
 
-    # def step(self, tensordict: TensorDictBase) -> TensorDictBase:
-    #     self.pre_physics_step(tensordict)
-    #     for i in range(self.control_freq_inv):
-    #         if self.force_render:
-    #             self.render()
-    #         self.gym.simulate(self.sim)
-    #     self.post_physics_step()
-    #     reward_and_done_td = self.compute_reward_and_done(tensordict)
-    #     self.reset_done()
-    #     state_and_obs_td = self.compute_state_and_obs(tensordict)
-    #     assert tensordict is not reward_and_done_td
-    #     assert tensordict is not state_and_obs_td
-    #     tensordict.update(reward_and_done_td)
-    #     tensordict.update(state_and_obs_td)
-        # return tensordict
+    def reset(self, tensordict: Optional[TensorDictBase]=None) -> TensorDictBase:
+        self.reset_done()
+        if tensordict is None:
+            tensordict = TensorDict({}, batch_size=self.batch_size)
+        state_and_obs_td = self.compute_state_and_obs(tensordict)
+        assert tensordict is not state_and_obs_td
+        tensordict.update(state_and_obs_td)
+        tensordict = step_tensordict(tensordict, keep_other=True)
+        return tensordict
 
-    # @abstractmethod
-    # def compute_reward_and_done(self, tensordict: TensorDictBase) -> TensorDictBase:
-    #     ...
+    @abstractmethod
+    def compute_reward_and_done(self, tensordict: TensorDictBase) -> TensorDictBase:
+        ...
     
-    # @abstractmethod
-    # def compute_state_and_obs(self, tensordict: TensorDictBase) -> TensorDictBase:
-    #     ...
+    @abstractmethod
+    def compute_state_and_obs(self, tensordict: TensorDictBase) -> TensorDictBase:
+        ...
 
     def on_reset(self, callback):
         self.reset_callbacks.append(callback)
 
     def reset_done(self):
-        env_ids = self.reset_buf.all(-1).nonzero(as_tuple=False).squeeze()
-        for callback in self.reset_callbacks:
-            callback(self, env_ids)
+        env_ids = self.reset_buf.all(-1).nonzero(as_tuple=False).squeeze(-1)
+        if len(env_ids) > 0:
+            for callback in self.reset_callbacks:
+                callback(self, env_ids)
     
