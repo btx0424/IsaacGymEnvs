@@ -53,13 +53,13 @@ class MAPPOPolicy:
             state_space: gym.Space,
             act_space: gym.Space) -> None:
         cfg.device = "cuda"
-        cfg.actor_lr = cfg.lr
+        cfg.actor_lr = cfg.actor_lr
         self.device = cfg.device
 
         # ppo
         self.clip_param = cfg.clip_param
-        self.ppo_epoch = cfg.ppo_epoch
-        self.num_mini_batch = cfg.num_mini_batch
+        self.ppo_epoch = cfg.ppo_epochs
+        self.num_mini_batch = cfg.num_minibatches
         self.data_chunk_length = cfg.data_chunk_length
         self.policy_value_loss_coef = cfg.policy_value_loss_coef
         self.value_loss_coef = cfg.value_loss_coef
@@ -123,7 +123,13 @@ class MAPPOPolicy:
         update_linear_schedule(self.actor_optimizer, episode, episodes, self.lr)
         update_linear_schedule(self.critic_optimizer, episode, episodes, self.critic_lr)
 
-    def get_action_and_value(self, share_obs, obs, rnn_states_actor, rnn_states_critic, masks, available_actions=None, deterministic=False) -> Dict[str, torch.Tensor]:
+    def get_action_and_value(self, 
+            share_obs, obs, 
+            rnn_states_actor=None, 
+            rnn_states_critic=None, 
+            masks=None, 
+            available_actions=None, 
+            deterministic=False) -> Dict[str, torch.Tensor]:
         actions, action_log_probs, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
         values, rnn_states_critic = self.critic(share_obs, rnn_states_critic, masks)
         return {

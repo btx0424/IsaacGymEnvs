@@ -87,17 +87,18 @@ class SharedReplayBuffer(object):
 
         self.step = 0
 
-    def insert(self, share_obs, obs: torch.Tensor, rnn_states, rnn_states_critic, actions, action_log_probs,
-               value_preds, rewards, masks, bad_masks=None, active_masks=None, available_actions=None):
-
-        if self._mixed_obs:
-            for key in self.share_obs.keys():
-                self.share_obs[key][self.step + 1] = share_obs[key]
-            for key in self.obs.keys():
-                self.obs[key][self.step + 1] = obs[key]
-        else:
-            self.share_obs[self.step + 1] = share_obs
-            self.obs[self.step + 1] = obs
+    def insert(self, 
+            share_obs, 
+            obs: torch.Tensor,
+            actions, 
+            action_log_probs,
+            value_preds, 
+            rewards, 
+            masks, 
+            rnn_states = None, 
+            rnn_states_critic = None, 
+            bad_masks=None, active_masks=None, 
+            available_actions=None):
 
         if rnn_states is not None:
             self.rnn_states[self.step + 1] = rnn_states

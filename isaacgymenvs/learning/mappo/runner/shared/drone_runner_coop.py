@@ -2,7 +2,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Dict, Tuple, Union, List
+from typing import Any, Callable, Dict, Tuple, Union, List
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from isaacgymenvs.tasks.quadrotor import QuadrotorBase
 import numpy as np
@@ -41,12 +41,27 @@ class PPOConfig:
 
 class TensorDict(Dict[str, torch.Tensor]):
     def reshape(self, *shape: int):
-        for key, value in self.items():
-            self[key] = value.reshape(*shape)
-        return self
+        return TensorDict({key: value.reshape(*shape) for key, value in self.items()})
 
     def flatten(self, start_dim: int = 0, end_dim: int = -1):
         return TensorDict({key: value.flatten(start_dim, end_dim) for key, value in self.items()})
+
+    def group(self, get_group: Callable[[str], Union[str, None]]):
+        groups = defaultdict(TensorDict)
+        others = TensorDict()
+        for k, v in self.items():
+            group = get_group(k)
+            if group: groups[group][k] = v
+            else: others[k] = v
+        return TensorDict(**groups), others
+
+    def group_by_agent(self):
+        return self.group(self.get_agent_group)
+    
+    @staticmethod
+    def get_agent_group(k: str):
+        idx = k.find('@')
+        return k[:idx] if idx != -1 else None
 
 def collect_episode_infos(infos: Dict[str, List], tag: str) -> Dict:
     results = {}
@@ -78,15 +93,9 @@ class DroneRunner(Runner):
         self.device = cfg.rl_device
         all_args = config["all_args"]
 
-        if all_args.use_attn:
-            envs: QuadrotorBase = config["envs"]
-            obs_split = envs.obs_split
-            envs.state_space = envs.obs_space = \
-                [sum(num*dim for num, dim in obs_split), *obs_split]
-
         super().__init__(config)
 
-        self.agents = self.envs.agents
+        self.agents = self.envs.agent_types
         if len(self.agents) > 1:
             self.num_agents = {
                 agent: getattr(self.envs, f"num_{agent}s") for agent in self.agents
@@ -103,14 +112,14 @@ class DroneRunner(Runner):
             self.policies[agent] = MAPPOPolicy(
                 self.all_args,
                 envs.obs_space,
-                envs.state_space,
+                envs.obs_space,
                 envs.act_space)
             self.buffers[agent] = SharedReplayBuffer(
                 self.all_args,
                 self.num_envs,
                 self.num_agents[agent],
                 envs.obs_space,
-                envs.state_space,
+                envs.obs_space,
                 envs.act_space)
 
         # timers & counters
@@ -128,8 +137,68 @@ class DroneRunner(Runner):
 
     def run(self):
         self.training = True
-        obs_dict = self.envs.reset()
+        tensordict = self.envs.reset()
+        for agent_type, buffer in self.buffers.items():
+            buffer.obs[0] = tensordict[f"obs@{agent_type}"]
+            buffer.share_obs[0] = tensordict[f"state"]
+        
+        def joint_policy(tensordict: TensorDict):
+            # grouped, others = tensordict.group_by_agent()
+            for agent_type, policy in self.policies.items():
+                result_dict = policy.get_action_and_value(
+                    share_obs=tensordict["state"].flatten(0, 1),
+                    obs=tensordict[f"obs@{agent_type}"].flatten(0, 1),
+                )
+                tensordict[f"actions@{agent_type}"] = result_dict["action"].reshape(self.num_envs, -1)
+                tensordict[f"value@{agent_type}"] = result_dict["value"].reshape(self.num_envs, -1)
+                tensordict[f"action_log_prob@{agent_type}"] = result_dict["action_log_prob"].reshape(self.num_envs, -1)
+            return tensordict
+        
+        episode_infos = defaultdict(list)
 
+        def step_callback(env, tensordict, step):
+            for agent_type, buffer in self.buffers.items():
+                buffer.insert(**TensorDict(dict(
+                    share_obs=tensordict["next_state"],
+                    obs=tensordict[f"next_obs@{agent_type}"],
+                    actions=tensordict[f"actions@{agent_type}"],
+                    action_log_probs=tensordict[f"action_log_prob@{agent_type}"],
+                    rewards=tensordict[f"reward@{agent_type}"].sum(-1),
+                    masks=1.0 - tensordict[f"done@{agent_type}"],
+                    value_preds=tensordict[f"value@{agent_type}"],
+                )).reshape(self.num_envs, self.num_agents[agent_type], -1))
+
+            env_done = tensordict["env_done"].squeeze(-1)
+            if env_done.any():
+                for k, v in env.extras["episode"][env_done].items():
+                    episode_infos[k].extend(v.tolist())
+
+        for iteration in range(self.max_iterations):
+            iter_start = time.time()
+            for agent_type, policy in self.policies.items():
+                policy.prep_rollout()
+            with torch.no_grad():
+                tensordict = self.envs.rollout(
+                    tensordict=tensordict,
+                    max_steps=self.num_steps, 
+                    policy=joint_policy, 
+                    callback=step_callback)
+            
+            train_infos = {}
+            for agent_type, policy in self.policies.items():
+                buffer = self.buffers[agent_type]
+                policy.prep_training()
+                train_infos[agent_type] = policy.train(buffer)      
+                buffer.after_update()
+            iter_end = time.time()
+
+            if iteration % self.log_interval == 0:
+                logging.info(f"FPS: {self.num_envs*self.num_steps/(iter_end-iter_start)}")
+                collect_episode_infos(episode_infos, "train")
+                episode_infos.clear()
+            self.total_env_steps += self.num_steps * self.num_envs
+
+        raise
         rnn_states_dict = {
             agent: policy.get_initial_rnn_states(self.num_envs * self.num_agents[agent])
             for agent, policy in self.policies.items() if policy is not None
@@ -145,7 +214,6 @@ class DroneRunner(Runner):
                 buffer.share_obs[0] = agent_obs_dict["state"].reshape(self.num_envs, self.num_agents[agent], -1)
 
 
-        episode_infos = defaultdict(list)
         distributions = defaultdict(list)
         metric = "success"
         if "best_" + metric not in wandb.run.summary.keys():
@@ -339,12 +407,12 @@ class DroneRunner(Runner):
     
     def train(self) -> Dict[str, Any]:
         train_infos = {}
-        # for agent, policy in self.policies.items():
-        #     if isinstance(policy, MAPPOPolicy):
-        #         buffer = self.buffers[agent]
-        #         policy.prep_training()
-        #         train_infos[agent] = policy.train(buffer)      
-        #         buffer.after_update()
+        for agent, policy in self.policies.items():
+            if isinstance(policy, MAPPOPolicy):
+                buffer = self.buffers[agent]
+                policy.prep_training()
+                train_infos[agent] = policy.train(buffer)      
+                buffer.after_update()
         self.log_system()
         return train_infos
 
