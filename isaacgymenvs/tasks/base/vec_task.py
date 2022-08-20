@@ -893,3 +893,6 @@ class MultiAgentVecTask(VecTask, _EnvClass):
             self.gym.set_actor_root_state_tensor_indexed(
                 self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
     
+    def get_dummy_policy(self, *args, **kwargs):
+        raise NotImplementedError
+        

@@ -307,12 +307,13 @@ class DroneRunner(Runner):
                     episode_infos[k].extend(v.tolist())
 
         for iteration in range(self.max_iterations):
-            iter_start = time.time()
+            iter_start = time.perf_counter()
             for agent_type, policy in self.policies.items():
                 policy.eval()
             with torch.no_grad(), set_exploration_mode("random"):
                 tensordict = self.envs.rollout(max_steps=self.num_steps, policy=joint_policy, tensordict=tensordict, callback=step_callback)
-            
+            rollout_end = time.perf_counter()
+
             batch = replay_buffer
             for agent_type, policy in self.policies.items():
                 agent_batch = {}
@@ -320,10 +321,10 @@ class DroneRunner(Runner):
                 agent_batch.update({k: v.flatten(1, 2) for k, v in batch.items() if k in common_keys})
                 
                 agent_train_info = policy.update(agent_batch)
-
-            iter_end = time.time()
+            
+            iter_end = time.perf_counter()
             if iteration % self.log_interval == 0:
-                logging.info(f"FPS: {self.num_envs*self.num_steps/(iter_end-iter_start)}")
+                logging.info(f"FPS: {self.num_envs*self.num_steps/(iter_end-iter_start)}, rollout: {rollout_end-iter_start:.2f}, train: {iter_end-rollout_end:.2f}")
                 collect_episode_infos(episode_infos, "train")
                 episode_infos.clear()
             self.total_env_steps += self.num_steps * self.num_envs

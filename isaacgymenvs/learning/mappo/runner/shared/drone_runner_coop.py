@@ -140,13 +140,12 @@ class DroneRunner(Runner):
         tensordict = self.envs.reset()
         for agent_type, buffer in self.buffers.items():
             buffer.obs[0] = tensordict[f"obs@{agent_type}"]
-            buffer.share_obs[0] = tensordict[f"state"]
+            buffer.share_obs[0] = tensordict[f"obs@{agent_type}"]
         
         def joint_policy(tensordict: TensorDict):
-            # grouped, others = tensordict.group_by_agent()
             for agent_type, policy in self.policies.items():
                 result_dict = policy.get_action_and_value(
-                    share_obs=tensordict["state"].flatten(0, 1),
+                    share_obs=tensordict[f"obs@{agent_type}"].flatten(0, 1),
                     obs=tensordict[f"obs@{agent_type}"].flatten(0, 1),
                 )
                 tensordict[f"actions@{agent_type}"] = result_dict["action"].reshape(self.num_envs, -1)
@@ -154,19 +153,12 @@ class DroneRunner(Runner):
                 tensordict[f"action_log_prob@{agent_type}"] = result_dict["action_log_prob"].reshape(self.num_envs, -1)
             return tensordict
         
-        def dummy_joint_policy(tensordict: TensorDict):
-            target_pos = tensordict["obs@predator"][..., :3]
-            tensordict["actions@predator"] = target_pos
-            tensordict["value@predator"] = torch.zeros(tensordict["obs@predator"].shape[:-1] + (1,), device=self.device)
-            tensordict["action_log_prob@predator"] = torch.zeros(tensordict["obs@predator"].shape[:-1] + (1,), device=self.device)
-            return tensordict
-
         episode_infos = defaultdict(list)
 
         def step_callback(env, tensordict, step):
             for agent_type, buffer in self.buffers.items():
                 buffer.insert(**TensorDict(dict(
-                    share_obs=tensordict["next_state"],
+                    share_obs=tensordict[f"next_obs@{agent_type}"],
                     obs=tensordict[f"next_obs@{agent_type}"],
                     actions=tensordict[f"actions@{agent_type}"],
                     action_log_probs=tensordict[f"action_log_prob@{agent_type}"],
@@ -181,7 +173,7 @@ class DroneRunner(Runner):
                     episode_infos[k].extend(v.tolist())
 
         for iteration in range(self.max_iterations):
-            iter_start = time.time()
+            iter_start = time.perf_counter()
             for agent_type, policy in self.policies.items():
                 policy.prep_rollout()
             with torch.no_grad():
@@ -190,12 +182,13 @@ class DroneRunner(Runner):
                     max_steps=self.num_steps, 
                     policy=joint_policy, 
                     callback=step_callback)
+            rollout_end = time.perf_counter()
             self.compute()
             train_infos = self.train()
-            iter_end = time.time()
+            iter_end = time.perf_counter()
 
             if iteration % self.log_interval == 0:
-                logging.info(f"FPS: {self.num_envs*self.num_steps/(iter_end-iter_start)}")
+                logging.info(f"FPS: {self.num_envs*self.num_steps/(iter_end-iter_start)}, rollout: {rollout_end-iter_start:.2f}, train: {iter_end-rollout_end:.2f}")
                 collect_episode_infos(episode_infos, "train")
                 episode_infos.clear()
             self.total_env_steps += self.num_steps * self.num_envs
@@ -379,22 +372,6 @@ class DroneRunner(Runner):
                 wandb.run.summary["episode"] = self.total_episodes
                 wandb.run.summary["iteration"] = iteration
                 break
-
-    def insert(self, data, buffer: SharedReplayBuffer = None):
-        obs, rewards, dones, values, actions, action_log_probs, rnn_states, rnn_states_critic = data
-
-        if rnn_states is not None: rnn_states[:, dones] = 0
-        if rnn_states_critic is not None: rnn_states_critic[:, dones] = 0
-
-        masks = (1.0 - dones)
-
-        share_obs = obs
-
-        buffer.insert(
-            share_obs, obs, 
-            rnn_states, rnn_states_critic, 
-            actions, action_log_probs, 
-            values, rewards, masks)
 
     @torch.no_grad()
     def compute(self):

@@ -99,6 +99,9 @@ class SharedReplayBuffer(object):
             rnn_states_critic = None, 
             bad_masks=None, active_masks=None, 
             available_actions=None):
+        
+        self.share_obs[self.step + 1] = share_obs
+        self.obs[self.step + 1] = obs
 
         if rnn_states is not None:
             self.rnn_states[self.step + 1] = rnn_states

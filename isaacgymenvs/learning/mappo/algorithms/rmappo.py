@@ -100,25 +100,6 @@ class MAPPOPolicy:
             if self._use_policy_vhead:
                 self.policy_value_normalizer = None
 
-    def __call__(self, tensordict: TensorDict, compute_values) -> TensorDict:
-        actions, action_log_probs, rnn_states_actor = self.actor(
-            tensordict["obs"], 
-            tensordict.get("rnn_states_actor", None), 
-            tensordict["masks"], 
-            tensordict.get("available_actions", None))
-        tensordict.update({"actions": actions, "action_log_probs": action_log_probs})
-        if rnn_states_actor is not None:
-            tensordict.set("next_rnn_states_actor", rnn_states_actor)
-        if compute_values:
-            values, rnn_states_critic = self.critic(
-                tensordict["state"], 
-                tensordict.get("rnn_states_critic", None), 
-                tensordict["masks"])
-            tensordict.set("values", values)
-            if rnn_states_critic is not None:
-                tensordict.set("next_rnn_states_critic", rnn_states_critic)
-        return tensordict
-
     def lr_decay(self, episode, episodes):
         update_linear_schedule(self.actor_optimizer, episode, episodes, self.lr)
         update_linear_schedule(self.critic_optimizer, episode, episodes, self.critic_lr)
