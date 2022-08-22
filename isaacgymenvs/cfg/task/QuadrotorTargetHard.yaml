@@ -21,7 +21,7 @@ env:
   actType: pid_vel
   numTargets: 1
 
-  maxLinearVelocity: 2
+  maxLinearVelocity: 100
   
 sim:
   dt: 0.01
@@ -47,3 +47,4 @@ sim:
 targetSpeed: 1
 boundaryRadius: 2.5
 taskSpec: ["target_speed", "spawn_pos"]
+rewardMix: 1

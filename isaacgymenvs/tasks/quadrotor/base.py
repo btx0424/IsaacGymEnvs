@@ -230,9 +230,11 @@ class QuadrotorBase(MultiAgentVecTask):
         rpms = self.act_processor(tensordict["actions"].reshape(-1)).view(self.num_envs, self.num_agents, 4)
         tensordict["rpms"] = rpms
 
+        rpms = torch.nan_to_num(rpms) # TODO@Botian why does the controller give NaN?
         rpms = torch.clamp(rpms, 0, self.MAX_RPM)
         forces = rpms**2 * self.KF # (env, actor, 4)
         torques = rpms**2 * self.KM
+
         z_torques = (-torques[..., 0] + torques[..., 1] - torques[..., 2] + torques[..., 3]) # (env, actor)
 
         self.forces[..., self.env_body_index["prop"], 2] = forces.reshape(self.num_envs, 4*self.num_agents)
@@ -243,11 +245,6 @@ class QuadrotorBase(MultiAgentVecTask):
             gymtorch.unwrap_tensor(self.z_torques), gymapi.LOCAL_SPACE)
 
     def post_physics_step(self):
-        self.progress_buf += 1
-        self.refresh_tensors()
-        
-        self.extras["t"] = self.progress_buf.clone()
-
         if self.viewer and self.viewer_lines:
             self.gym.clear_lines(self.viewer)
             for points, color in self.viewer_lines:
@@ -257,7 +254,7 @@ class QuadrotorBase(MultiAgentVecTask):
     def refresh_tensors(self):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_net_contact_force_tensor(self.sim)
-
+        
     @property
     def quadrotor_states(self) -> TensorDict:
         pos, quat, linvel, angvel = self.root_states[:, self.env_actor_index["drone"]]\
@@ -297,7 +294,7 @@ class QuadrotorBase(MultiAgentVecTask):
                     torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
                     torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
                     torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-                )[0]
+                )
                 return rpms.view(self.num_envs, self.num_agents, 4)
             self.act_processor = act_processor
         elif act_type == "pid_vel":
@@ -316,17 +313,14 @@ class QuadrotorBase(MultiAgentVecTask):
                     torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
                     target_vel,
                     torch.zeros((self.num_envs*self.num_agents, 3), device=self.device),
-                )[0]
+                )
                 return rpms.view(self.num_envs, self.num_agents, 4)
             self.act_processor = act_processor
         elif act_type == "rpm":
             ones = np.ones(4)
-            self.thrusts = torch.ones(self.num_envs, self.num_agents, 4, device=self.device) * self.HOVER_RPM
             self.act_space = spaces.Box(-ones, ones)
-            def act_processor(actions: Tensor) -> Tensor:
-                self.thrusts.add_(self.dt * actions * 20000)
-                self.thrusts.clamp_max_(self.HOVER_RPM * 1.5)
-                return self.thrusts
+            def act_processor(rpms: Tensor) -> Tensor:
+                return self.HOVER_RPM * (1+0.05*rpms)
             self.act_processor = act_processor
         else:
             raise NotImplementedError(act_type)

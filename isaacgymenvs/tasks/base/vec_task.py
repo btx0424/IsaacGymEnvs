@@ -818,9 +818,8 @@ class MultiAgentVecTask(VecTask, _EnvClass):
         max_episodes: Optional[int]=None,
         policy: Optional[Callable[[TensorDictBase], TensorDictBase]] = None,
         callback = None, #: Optional[Callable[[TensorDictBase, ...], TensorDictBase]] = None,
-        # break_when_any_done: bool = True,
-        return_contiguous: bool = True,
         tensordict: Optional[TensorDictBase] = None,
+        verbose: bool = False,
     ) -> TensorDictBase:
         steps = 0
         episodes = 0
@@ -853,17 +852,20 @@ class MultiAgentVecTask(VecTask, _EnvClass):
             if self.force_render:
                 self.render()
             self.gym.simulate(self.sim)
+        
+        self.progress_buf += 1
+        self.refresh_tensors()
         self.post_physics_step()
         reward_and_done_td = self.compute_reward_and_done(tensordict)
         self.reset_done()
         state_and_obs_td = self.compute_state_and_obs(tensordict)
-        assert tensordict is not reward_and_done_td
-        assert tensordict is not state_and_obs_td
+        
         tensordict.update(reward_and_done_td)
         tensordict.update(state_and_obs_td)
         return tensordict
 
     def reset(self, tensordict: Optional[TensorDictBase]=None) -> TensorDictBase:
+        self.reset_buf.fill_(1)
         self.reset_done()
         if tensordict is None:
             tensordict = TensorDict({}, batch_size=self.batch_size)
@@ -892,7 +894,12 @@ class MultiAgentVecTask(VecTask, _EnvClass):
             root_reset_ids = self.sim_actor_index["__all__"][env_ids].flatten()
             self.gym.set_actor_root_state_tensor_indexed(
                 self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
+        self.refresh_tensors()
     
+    @abstractmethod
+    def refresh_tensors():
+        ...
+        
     def get_dummy_policy(self, *args, **kwargs):
         raise NotImplementedError
         

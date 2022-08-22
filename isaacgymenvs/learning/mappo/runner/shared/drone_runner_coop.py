@@ -138,10 +138,19 @@ class DroneRunner(Runner):
     def run(self):
         self.training = True
         tensordict = self.envs.reset()
-        for agent_type, buffer in self.buffers.items():
-            buffer.obs[0] = tensordict[f"obs@{agent_type}"]
-            buffer.share_obs[0] = tensordict[f"obs@{agent_type}"]
+        episode_infos = defaultdict(list)
+
+        metric_key = "train/reward_capture@predator_mean"
+        if "best_" + metric_key not in wandb.run.summary.keys(): 
+            wandb.run.summary["best_" + metric_key] = 0
         
+        def init_buffer(tensordict):
+            for agent_type, buffer in self.buffers.items():
+                buffer.obs[0] = tensordict[f"obs@{agent_type}"]
+                buffer.share_obs[0] = tensordict[f"obs@{agent_type}"]
+        
+        init_buffer(tensordict)
+
         def joint_policy(tensordict: TensorDict):
             for agent_type, policy in self.policies.items():
                 result_dict = policy.get_action_and_value(
@@ -153,9 +162,6 @@ class DroneRunner(Runner):
                 tensordict[f"action_log_prob@{agent_type}"] = result_dict["action_log_prob"].reshape(self.num_envs, self.num_agents[agent_type], -1)
             return tensordict
         
-        dummy_policy = self.envs.get_dummy_policy()
-
-        episode_infos = defaultdict(list)
 
         def step_callback(env, tensordict, step):
             for agent_type, buffer in self.buffers.items():
@@ -173,6 +179,7 @@ class DroneRunner(Runner):
             if env_done.any():
                 for k, v in env.extras["episode"][env_done].items():
                     episode_infos[k].extend(v.tolist())
+                self.total_episodes += env_done.sum().item()
 
         for iteration in range(self.max_iterations):
             iter_start = time.perf_counter()
@@ -189,32 +196,42 @@ class DroneRunner(Runner):
             train_infos = self.train()
             iter_end = time.perf_counter()
 
-            if iteration % self.log_interval == 0:
-                logging.info(f"FPS: {self.num_envs*self.num_steps/(iter_end-iter_start)}, rollout: {rollout_end-iter_start:.2f}, train: {iter_end-rollout_end:.2f}")
-                collect_episode_infos(episode_infos, "train")
-                episode_infos.clear()
+            self.env_steps_this_run += self.num_steps * self.num_envs
             self.total_env_steps += self.num_steps * self.num_envs
 
-        raise
-        rnn_states_dict = {
-            agent: policy.get_initial_rnn_states(self.num_envs * self.num_agents[agent])
-            for agent, policy in self.policies.items() if policy is not None
-        }
-        masks_dict = {
-            agent: torch.ones((self.num_envs * self.num_agents[agent], 1), device=self.device)
-            for agent in self.agents
-        }
-        for agent, agent_obs_dict in obs_dict.items():
-            buffer: Union[SharedReplayBuffer, None] = self.buffers.get(agent)
-            if buffer:
-                buffer.obs[0] = agent_obs_dict["obs"].reshape(self.num_envs, self.num_agents[agent], -1)
-                buffer.share_obs[0] = agent_obs_dict["state"].reshape(self.num_envs, self.num_agents[agent], -1)
+            if iteration % self.log_interval == 0:
+                fps = (self.num_steps * self.num_envs) / (iter_end - iter_start)
+                logging.info(f"Iteration {iteration}/{self.max_iterations}, Env steps: {self.env_steps_this_run}/{self.max_env_steps} (this run), {self.total_env_steps} (total), Episodes: {self.total_episodes}")
+                logging.info(f"FPS: {fps:.0f}, rollout: {rollout_end-iter_start:.2f}, train: {iter_end-rollout_end:.2f}")
+                
+                train_infos.update(collect_episode_infos(episode_infos, "train"))
+                train_infos["fps"] = fps
+                self.log(train_infos)
 
+                episode_infos.clear()
+
+            if self.eval_interval > 0 and iteration % self.eval_interval == 0:
+                self.eval(self.eval_episodes, log=True, pbar=False)
+                tensordict = self.envs.reset()
+                init_buffer(tensordict)
+
+            if (
+                    metric_key in train_infos.keys() and
+                    train_infos.get(metric_key) > wandb.run.summary[f"best_{metric_key}"]
+                ):
+                wandb.run.summary[f"best_{metric_key}"] = train_infos.get(metric_key)
+                logging.info(f"Saving best model with {metric_key}: {wandb.run.summary[f'best_{metric_key}']}")
+                self.save()
+
+            if self.env_steps_this_run > self.max_env_steps:
+                wandb.run.summary["env_step"] = self.total_env_steps
+                wandb.run.summary["episode"] = self.total_episodes
+                wandb.run.summary["iteration"] = iteration
+                break
+
+        return wandb.run.summary
 
         distributions = defaultdict(list)
-        metric = "success"
-        if "best_" + metric not in wandb.run.summary.keys():
-            wandb.run.summary["best_" + metric] = 0.0
 
         # setup CL
         if self.use_cl:
@@ -389,16 +406,16 @@ class DroneRunner(Runner):
     def train(self) -> Dict[str, Any]:
         train_infos = {}
         for agent_type, policy in self.policies.items():
-            if agent_type == self.agents[0]:
-                buffer = self.buffers[agent_type]
-                policy.prep_training()
-                train_infos[agent_type] = policy.train(buffer)      
-                buffer.after_update()
+            buffer = self.buffers[agent_type]
+            policy.prep_training()
+            train_infos[agent_type] = policy.train(buffer)      
+            buffer.after_update()
         self.log_system()
         return train_infos
 
     def log(self, info: Dict[str, Any]):
-        wandb.log({f"{k}": v for k, v in info.items()})
+        info["env_step"] = self.total_env_steps
+        wandb.log(info)
 
     def save(self):
         logging.info(f"Saving models to {wandb.run.dir}")
@@ -422,183 +439,35 @@ class DroneRunner(Runner):
             self.total_episodes = checkpoint["episodes"]
             self.total_env_steps = checkpoint["env_steps"]
 
-    def eval(self, eval_episodes, log=True, pbar=False):
+    def eval(self, eval_episodes, log=True, verbose=False):
         stamp_str = f"Eval at {self.total_env_steps}(total)/{self.env_steps_this_run}(this run) steps."
         logging.info(stamp_str)
-        for agent, policy in self.policies.items():
-            policy.actor.eval()
-            policy.critic.eval()
+        for agent_type, policy in self.policies.items():
+            policy.prep_rollout()
 
-        if self.env_steps_this_run == 0:
-            obs_dict = self.envs.reset()
+        episode_infos = defaultdict(list)
+        def step_callback(env, tensordict, step):
+            env_done = tensordict["env_done"].squeeze(-1)
+            if env_done.any():
+                for k, v in env.extras["episode"][env_done].items():
+                    episode_infos[k].extend(v.tolist())
+        
+        def eval_policy(tensordict):
+            for agent_type, policy in self.policies.items():
+                actions, _ = policy.act(
+                    obs=tensordict[f"obs@{agent_type}"],
+                    rnn_states_actor=None #tensordict[f"rnn_states_actor@{agent_type}"],
+                )
+                tensordict[f"actions@{agent_type}"] = actions
+            return tensordict
 
-            rnn_states_dict = {
-                agent: policy.get_initial_rnn_states(self.num_envs * self.num_agents[agent])
-                for agent, policy in self.policies.items() if policy is not None
-            }
-            masks_dict = {
-                agent: torch.ones((self.num_envs * self.num_agents[agent], 1), device=self.device)
-                for agent in self.agents
-            }
-            for agent, agent_obs_dict in obs_dict.items():
-                buffer: Union[SharedReplayBuffer, None] = self.buffers.get(agent)
-                if buffer:
-                    buffer.obs[0] = agent_obs_dict["obs"].reshape(self.num_envs, self.num_agents[agent], -1)
-                    buffer.share_obs[0] = agent_obs_dict["state"].reshape(self.num_envs, self.num_agents[agent], -1)
-        else:
-            for role, buffer in self.buffers.items():
-                assert buffer.step == 0, buffer.step
-            obs_dict = {
-                role: {"obs": buffer.obs[buffer.step], "state": buffer.share_obs[buffer.step]} 
-                for role, buffer in self.buffers.items()}
-            rnn_states_dict = {
-                role: (buffer.rnn_states[buffer.step], buffer.rnn_states_critic[buffer.step]) 
-                for role, buffer in self.buffers.items()
-            }
-            masks_dict = {
-                role: buffer.masks[buffer.step].flatten(end_dim=1)
-                for role, buffer in self.buffers.items()
-            }
-
-        already_reset = torch.zeros_like(self.envs.progress_buf, dtype=bool)
-
-        episode_infos = defaultdict(lambda: [])
-        scatter_plot_data = defaultdict(lambda: [])
-        metric = "reward_capture"
-
-        episode_count = 0
-        if pbar:
-            from tqdm import tqdm
-            _pbar = tqdm(total=eval_episodes, desc="Evaluating")
-
-        while episode_count < eval_episodes:
-
-            for setp in range(self.num_steps):
-                # tensors by agent
-                action_dict = TensorDict()
-                action_log_prob_dict = TensorDict()
-                value_dict = TensorDict()
-                rnn_state_actor_dict = TensorDict()
-                rnn_state_critic_dict = TensorDict()
-
-                for agent, agent_obs_dict in obs_dict.items():
-                    policy: MAPPOPolicy = self.policies[agent]
-                    policy.prep_rollout()
-                    rnn_state_actor, rnn_state_critic = rnn_states_dict[agent]                 
-                    masks = masks_dict[agent]
-                    with torch.no_grad():
-                        result_dict = policy.get_action_and_value(
-                            share_obs=agent_obs_dict["state"].flatten(end_dim=1),
-                            obs=agent_obs_dict["obs"].flatten(end_dim=1),
-                            rnn_states_actor=rnn_state_actor,
-                            rnn_states_critic=rnn_state_critic,
-                            masks=masks
-                        )
-                    action_dict[agent] = result_dict["action"]
-                    action_log_prob_dict[agent] = result_dict["action_log_prob"]
-                    value_dict[agent] = result_dict["value"]
-                    rnn_state_actor_dict[agent] = result_dict["rnn_state_actor"]
-                    rnn_state_critic_dict[agent] = result_dict["rnn_state_critic"]
-
-                step_result_dict, infos = self.envs.agents_step(action_dict)
-                env_dones: torch.Tensor = infos["env_dones"]
-
-                for agent, (agent_obs_dict, agent_reward, agent_done) in step_result_dict.items():
-                    # TODO: complete reward shaping
-                    agent_reward = agent_reward.sum(-1)
-                    
-                    obs_dict[agent] = agent_obs_dict
-                    masks_dict[agent] = (1.0 - agent_done).reshape(self.num_envs * self.num_agents[agent], 1)
-
-                    buffer = self.buffers.get(agent)
-                    if buffer:
-                        num_agents = self.num_agents[agent]
-                        data = (
-                            agent_obs_dict["obs"].reshape(self.num_envs, num_agents, -1),
-                            agent_reward.reshape(self.num_envs, num_agents, 1),
-                            agent_done.reshape(self.num_envs, num_agents, 1),
-                            value_dict[agent].reshape(self.num_envs, num_agents, 1),
-                            action_dict[agent].reshape(self.num_envs, num_agents, -1),
-                            action_log_prob_dict[agent].reshape(self.num_envs, num_agents, -1),
-                            rnn_state_actor_dict[agent],
-                            rnn_state_critic_dict[agent]
-                        )
-                        self.insert(data, buffer)
-
-                # record statistics
-                valid_envs = env_dones & already_reset
-                if valid_envs.any():
-                    episode_info = infos["episode"][valid_envs]
-                    task_config = infos["task_config"][valid_envs]
-
-                    for k, v in episode_info.items():
-                        episode_infos[k].extend(v.tolist())
-
-                    for k, v in task_config.items():
-                        if v.squeeze(-1).dim() == 1:
-                            episode_metric = episode_info[metric]
-                            if episode_metric.dim() > 1: 
-                                episode_metric = episode_metric.mean(-1)
-                            scatter_plot_data[metric].extend(episode_metric.tolist())
-                            scatter_plot_data[k].extend(v.squeeze(-1).tolist()) # (num_envs, 1) -> List
-                    
-                    episode_count += valid_envs.sum()
-                    if pbar:
-                        _pbar.update(valid_envs.sum().item())
-                    
-                already_reset |= env_dones
-
-            for buffer in self.buffers.values(): buffer.after_update()
+        with torch.no_grad():
+            self.envs.rollout(max_episodes=eval_episodes, policy=eval_policy, callback=step_callback)
 
         eval_infos = {"env_step": self.total_env_steps}
         eval_infos.update(collect_episode_infos(episode_infos, "eval"))
         
-        if len(scatter_plot_data) == 2:
-            data = list(zip(*scatter_plot_data.values()))
-            keys = list(scatter_plot_data.keys())
-            table = wandb.Table(data=data, columns=keys)
-            name = "eval/" + " vs ".join(keys)
-            eval_infos[name] = wandb.plot.scatter(table, *keys, title=name)
-        
         if log:
             self.log(eval_infos)
+        return eval_infos
 
-class TaskDist:
-    def __init__(self, capacity: int=1000, easy_threshold: float=400, hard_threshold:float=250) -> None:
-        self.capacity = capacity
-        self.task_config = None
-        self.metrics = None
-        self.easy_threshold = easy_threshold
-        self.hard_threshold = hard_threshold
-    
-    def add(self, task_config: TensorDict, metrics: torch.Tensor) -> None:
-        valid = metrics < self.hard_threshold
-        if valid.any():
-            task_config = task_config[valid]
-            metrics = metrics[valid]
-            if self.task_config is None:
-                self.task_config = task_config
-            else:
-                self.task_config = torch.cat((self.task_config, task_config))[-self.capacity:]
-            if self.metrics is None:
-                self.metrics = metrics[-self.capacity:]
-            else:
-                self.metrics = torch.cat([self.metrics, metrics])[-self.capacity:]
-    
-    def sample(self, n: int, mode: str="easy") -> Union[TensorDict, None]:
-        if mode == "easy":
-            task_config = self.task_config[self.metrics>=self.easy_threshold]
-        elif mode == "hard":
-            task_config = self.task_config[self.metrics<self.hard_threshold]
-        elif mode == "medium":
-            task_config = self.task_config[(self.metrics>=self.hard_threshold) & (self.metrics<self.easy_threshold)]
-        else:
-            raise ValueError(f"Unknown mode: {mode}")
-
-        if task_config.batch_size[0] > 0:
-            return task_config[torch.randint(0, task_config.batch_size[0], (n,))]
-        else:
-            return None
-        
-    def __len__(self) -> int:
-        return 0 if self.metrics is None else len(self.metrics)

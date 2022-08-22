@@ -228,34 +228,13 @@ class SharedReplayBuffer(object):
         num_steps, num_envs, num_agents = self.rewards.shape[0:3]
         batch_size = num_envs * num_steps * num_agents
 
-        if mini_batch_size is None:
-            assert batch_size >= num_mini_batch, (
-                "PPO requires the number of processes ({}) "
-                "* number of steps ({}) * number of agents ({}) = {} "
-                "to be greater than or equal to the number of PPO mini batches ({})."
-                "".format(num_envs, num_steps, num_agents, num_envs * num_steps * num_agents,
-                          num_mini_batch))
-            mini_batch_size = batch_size // num_mini_batch
+        assert batch_size % num_mini_batch == 0
 
-        rand = torch.randperm(batch_size)
-        sampler = [rand[i*mini_batch_size:(i+1)*mini_batch_size]
-                   for i in range(num_mini_batch)]
+        perm = torch.randperm(batch_size).reshape(num_mini_batch, -1)
 
-        if self._mixed_obs:
-            share_obs = {}
-            obs = {}
-            for key in self.share_obs.keys():
-                share_obs[key] = self.share_obs[key][:-
-                                                     1].reshape(-1, *self.share_obs[key].shape[3:])
-            for key in self.obs.keys():
-                obs[key] = self.obs[key][:-
-                                         1].reshape(-1, *self.obs[key].shape[3:])
-        else:
-            share_obs = self.share_obs[:-
-                                       1].reshape(-1, *self.share_obs.shape[3:])
-            obs = self.obs[:-1].reshape(-1, *self.obs.shape[3:])
+        share_obs = self.share_obs[:-1].reshape(-1, *self.share_obs.shape[3:])
+        obs = self.obs[:-1].reshape(-1, *self.obs.shape[3:])
         
-
         actions = self.actions.reshape(-1, self.actions.shape[-1])
         if self.available_actions is not None:
             available_actions = self.available_actions[:-
@@ -268,18 +247,9 @@ class SharedReplayBuffer(object):
             -1, self.action_log_probs.shape[-1])
         advantages = advantages.reshape(-1, 1)
 
-        for indices in sampler:
-            # obs size [T+1 N M Dim]-->[T N M Dim]-->[T*N*M,Dim]-->[index,Dim]
-            if self._mixed_obs:
-                share_obs_batch = {}
-                obs_batch = {}
-                for key in share_obs.keys():
-                    share_obs_batch[key] = share_obs[key][indices]
-                for key in obs.keys():
-                    obs_batch[key] = obs[key][indices]
-            else:
-                share_obs_batch = share_obs[indices]
-                obs_batch = obs[indices]
+        for indices in perm:
+            share_obs_batch = share_obs[indices]
+            obs_batch = obs[indices]
 
             actions_batch = actions[indices]
             if self.available_actions is not None:

@@ -5,7 +5,7 @@ import gym
 import torch
 import torch.nn as nn
 from dataclasses import dataclass
-from torch.nn.functional import mse_loss
+from torch.nn.functional import mse_loss, huber_loss
 import math
 from isaacgymenvs.learning.mappo.utils.valuenorm import ValueNorm
 from typing import Any, Dict, Tuple
@@ -33,10 +33,10 @@ def update_linear_schedule(optimizer, epoch, total_num_epochs, initial_lr):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-def huber_loss(e, d):
-    a = (abs(e) <= d).float()
-    b = (e > d).float()
-    return a*e**2/2 + b*d*(abs(e)-d/2)
+# def huber_loss(e, d):
+#     a = (abs(e) <= d).float()
+#     b = (e > d).float()
+#     return a*e**2/2 + b*d*(abs(e)-d/2)
 
 def get_gard_norm(it):
     sum_grad = 0
@@ -85,6 +85,8 @@ class MAPPOPolicy:
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.actor_lr, weight_decay=cfg.weight_decay)
         self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.critic_lr, weight_decay=cfg.weight_decay)
 
+        self.scaler = torch.cuda.amp.GradScaler()
+
         assert (self._use_popart and self._use_valuenorm) == False, ("self._use_popart and self._use_valuenorm can not be set True simultaneously")
         
         if self._use_popart:
@@ -130,7 +132,10 @@ class MAPPOPolicy:
         values, _ = self.critic(share_obs, rnn_states_critic, masks)
         return values, action_log_probs, dist_entropy, policy_values
 
-    def act(self, obs, rnn_states_actor, masks, available_actions=None, deterministic=False):
+    def act(self, 
+            obs, 
+            rnn_states_actor=None, 
+            masks=None, available_actions=None, deterministic=False):
         actions, _, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
         return actions, rnn_states_actor
     
@@ -141,13 +146,10 @@ class MAPPOPolicy:
         if self._use_huber_loss:
             if self._use_popart or self._use_valuenorm:
                 value_normalizer.update(return_batch)
-                error_clipped = value_normalizer.normalize(return_batch) - value_pred_clipped
-                error_original = value_normalizer.normalize(return_batch) - values
-            else:
-                error_clipped = return_batch - value_pred_clipped
-                error_original = return_batch - values
-            value_loss_clipped = huber_loss(error_clipped, self.huber_delta)
-            value_loss_original = huber_loss(error_original, self.huber_delta)
+                return_batch = value_normalizer.normalize(return_batch)
+            
+            value_loss_clipped = huber_loss(return_batch, value_pred_clipped, delta=self.huber_delta)
+            value_loss_original = huber_loss(return_batch, values, delta=self.huber_delta)
         else:
             if self._use_popart or self._use_valuenorm:
                 value_loss_clipped = mse_loss(value_normalizer.normalize(return_batch), value_pred_clipped)
@@ -168,21 +170,22 @@ class MAPPOPolicy:
 
         return value_loss
 
-    def ppo_update(self, sample, turn_on=True):
+    def ppo_update(self, sample):
 
         share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
         value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
         adv_targ, available_actions_batch = sample
 
         # Reshape to do in a single forward pass for all steps
+        # with torch.autocast(device_type=self.device, dtype=torch.float16):
         values, action_log_probs, dist_entropy, policy_values = self.evaluate_actions(share_obs_batch,
-                                                                              obs_batch, 
-                                                                              rnn_states_batch, 
-                                                                              rnn_states_critic_batch, 
-                                                                              actions_batch, 
-                                                                              masks_batch, 
-                                                                              available_actions_batch,
-                                                                              active_masks_batch)
+                                                                            obs_batch, 
+                                                                            rnn_states_batch, 
+                                                                            rnn_states_critic_batch, 
+                                                                            actions_batch, 
+                                                                            masks_batch, 
+                                                                            available_actions_batch,
+                                                                            active_masks_batch)
         # actor update
         ratio = torch.exp(action_log_probs - old_action_log_probs_batch)
 
@@ -190,41 +193,29 @@ class MAPPOPolicy:
         surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv_targ
 
         if self._use_policy_active_masks:
-            policy_action_loss = (-torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True) * active_masks_batch).sum() / active_masks_batch.sum()
+            policy_loss = (-torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True) * active_masks_batch).sum() / active_masks_batch.sum()
         else:
-            policy_action_loss = -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
-
-        if self._use_policy_vhead:
-            policy_value_loss = self.cal_value_loss(self.policy_value_normalizer, policy_values, value_preds_batch, return_batch, active_masks_batch)       
-            policy_loss = policy_action_loss + policy_value_loss * self.policy_value_loss_coef
-        else:
-            policy_loss = policy_action_loss
-
-        self.actor_optimizer.zero_grad()
-
-        if turn_on:
-            (policy_loss - dist_entropy * self.entropy_coef).backward()
-
-        if self._use_max_grad_norm:
-            actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-        else:
-            actor_grad_norm = get_gard_norm(self.actor.parameters())
-
-        self.actor_optimizer.step()
-
-        # critic update
+            policy_loss = -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
+        
+        policy_loss = policy_loss + self.entropy_coef * dist_entropy
         value_loss = self.cal_value_loss(self.value_normalizer, values, value_preds_batch, return_batch, active_masks_batch)
+        
+        # self.scaler.scale(policy_loss).backward()
+        policy_loss.backward()
+        # self.scaler.unscale_(self.actor_optimizer)
+        actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+        # self.scaler.step(self.actor_optimizer)
+        self.actor_optimizer.step()
+        self.actor_optimizer.zero_grad(set_to_none=True)
 
-        self.critic_optimizer.zero_grad()
-
+        # self.scaler.scale(value_loss * self.value_loss_coef).backward()
         (value_loss * self.value_loss_coef).backward()
-
-        if self._use_max_grad_norm:
-            critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        else:
-            critic_grad_norm = get_gard_norm(self.critic.parameters())
-
+        # self.scaler.unscale_(self.critic_optimizer)
+        critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
+        # self.scaler.step(self.critic_optimizer)
         self.critic_optimizer.step()
+        self.critic_optimizer.zero_grad(set_to_none=True)
+        # self.scaler.update()
 
         return value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, ratio
         
@@ -255,18 +246,14 @@ class MAPPOPolicy:
 
             for i, sample in enumerate(data_generator):
                 value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, ratio \
-                    = self.ppo_update(sample, turn_on)
+                    = self.ppo_update(sample)
 
                 train_info['value_loss'] += value_loss.item()
                 train_info['policy_loss'] += policy_loss.item()
                 train_info['dist_entropy'] += dist_entropy.item()
                 
-                if int(torch.__version__[2]) < 5:
-                    train_info['actor_grad_norm'] += actor_grad_norm
-                    train_info['critic_grad_norm'] += critic_grad_norm
-                else:
-                    train_info['actor_grad_norm'] += actor_grad_norm.item()
-                    train_info['critic_grad_norm'] += critic_grad_norm.item()
+                train_info['actor_grad_norm'] += actor_grad_norm.item()
+                train_info['critic_grad_norm'] += critic_grad_norm.item()
 
                 train_info['ratio'] += ratio.mean().item()
 

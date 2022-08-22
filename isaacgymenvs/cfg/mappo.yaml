@@ -20,7 +20,7 @@ torch_deterministic: False
 
 # set the maximum number of learning iterations to train for. overrides default per-environment setting
 max_iterations: 2000
-max_env_steps: 500_000_000
+max_env_steps: 1_000_000_000
 
 ## Device config
 #  'physx' or 'flex'

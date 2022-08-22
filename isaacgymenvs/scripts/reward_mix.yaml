@@ -1,0 +1,45 @@
+project: isaacgymenvs
+name: reward_mix
+program: train_mappo.py
+
+method: grid
+
+metric:
+  name: train/reward_capture@predator
+  goal: maximize
+
+parameters:
+  task.targetSpeed:
+    values: 
+      - [0, 4]
+  
+  task.rewardMix:
+    values: [1, 0.6, 0.3, 0]
+
+  seed:
+    values: [123, 456]
+
+  # params.num_mini_batch:
+  #   values: [16, 32]
+  # params.ppo_epoch:
+  #   values: [10, 16]
+  # seed:
+  #   values: [31, 54]
+
+  # max_env_steps:
+  #   values:
+  #     - 500_000_000
+
+  # capture_video:
+  #   values:
+  #     - True
+
+  wandb_name:
+    values:
+      - reward_mix
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

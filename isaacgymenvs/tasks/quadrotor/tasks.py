@@ -11,11 +11,15 @@ from torchrl.data import TensorDict, CompositeSpec, NdBoundedTensorSpec, NdUnbou
 
 from .base import QuadrotorBase
 
+@torch.jit.script
 def normalize(x: torch.Tensor) -> torch.Tensor:
-    return x / (1e-7 + x.norm(dim=-1, keepdim=True))
+    return x / (1e-7 + torch.norm(x, dim=-1, keepdim=True))
 
-def uniform(*size, low: float, high: float, device: torch.device) -> torch.Tensor:
-    return torch.rand(*size, device=device)*(high-low) + low
+def uniform(size, low: float, high: float, device: torch.device) -> torch.Tensor:
+    return torch.rand(size, device=device)*(high-low) + low
+
+def mix(x: torch.Tensor, y: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
+    return x * a + y * (1 - a)
 
 class TargetEasy(QuadrotorBase):
     agents = ["predator"]
@@ -174,7 +178,7 @@ class TargetHard(QuadrotorBase):
         self.boundary_radius  = cfg.get("boundaryRadius", 2.5)
         assert self.boundary_radius > 1
         self.task_spec = cfg.get("taskSpec", ["target_speed"])
-        self.reward_mix = cfg.get("rewardMix", 1.) # 1: independent, 0: completely shared
+        self.shared_reward_mix = cfg.get("rewardMix", 1.) # 1: shared, 0: independent
 
         def reset_actors(_, env_ids: torch.Tensor):
             self.root_positions[env_ids, self.env_actor_index["target"]] = torch.tensor([0, 0, 0.5], device=self.device)
@@ -183,7 +187,8 @@ class TargetHard(QuadrotorBase):
             randperm = torch.randperm(len(self.grid_avail), device=self.device)
             num_samples = env_ids.numel() * self.num_agents
             sample_idx = randperm[torch.arange(num_samples).reshape(len(env_ids), self.num_agents)%len(self.grid_avail)]
-            self.root_positions[env_ids, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
+            index_slice = slice(self.env_actor_index["drone"][0], self.env_actor_index["drone"][-1]+1)
+            self.root_positions[env_ids, index_slice] = self.grid_centers[sample_idx]
             if "spawn_pos" in self.task_spec:
                 self.task_config["spawn_pos_idx"][env_ids] = sample_idx
 
@@ -230,17 +235,18 @@ class TargetHard(QuadrotorBase):
         contact = self.contact_forces[:, self.env_body_index["base"]]
 
         target_distance = torch.norm(self.target_pos-pos, dim=-1) # (num_envs, num_agents)
-        target_distance_min = target_distance.min(dim=-1)
-        distance_reward = (1.0 / (1.0 + target_distance_min.values ** 2))
+        distance_reward = (1.0 / (1.0 + target_distance ** 2)) # (num_envs, num_agents)
         collision_penalty = contact.any(-1).float()
 
-        captured: torch.Tensor = target_distance_min.values < self.capture_radius
+        capture: torch.Tensor = target_distance < self.capture_radius
+        captured = capture.any(dim=-1)
         self.captured_steps_buf[~captured] = 0
         self.captured_steps_buf[captured] += 1
 
-        self.rew_buf[..., 0] = distance_reward.unsqueeze(-1)
+        capture_reward = capture.float()
+        self.rew_buf[..., 0] = mix(distance_reward.mean(-1, keepdim=True), distance_reward, self.shared_reward_mix)
         self.rew_buf[..., 1] = -collision_penalty
-        self.rew_buf[..., 2] = captured.float().unsqueeze(-1)
+        self.rew_buf[..., 2] = mix(capture_reward.mean(-1, keepdim=True), capture_reward, self.shared_reward_mix)
         
         self.cum_rew_buf.add_(self.rew_buf)
         
@@ -256,7 +262,7 @@ class TargetHard(QuadrotorBase):
             "reward_collision@predator": cum_reward[..., 1],
             "reward_capture@predator": cum_reward[..., 2],
             "success@predator": (self.captured_steps_buf > self.success_threshold).float(),
-            "length": self.progress_buf.clone() + 1,
+            "length": self.progress_buf + 1,
         })
 
         return TensorDict({
@@ -281,6 +287,7 @@ class TargetHard(QuadrotorBase):
         states_box = self.box_states.repeat(self.num_envs, self.num_agents, 1, 1)
         states_box[..., :3] = states_box[..., :3] - states_self[..., :3].unsqueeze(2)
         states_box = states_box.reshape(self.num_envs, self.num_agents, -1)
+        
         obs_tensor.append(states_target)
         obs_tensor.append(states_box)
         obs_tensor.append(states_all)
@@ -388,6 +395,7 @@ class PredatorPrey(QuadrotorBase):
         self.prey_index = slice(-1, None)
         self.env_predator_index = self.env_actor_index["drone"][self.predator_index]
         self.env_prey_index = self.env_actor_index["drone"][self.prey_index]
+        self.env_drone_slice = slice(self.env_actor_index["drone"][0], self.env_actor_index["drone"][-1] + 1)
         self.obs_split = [(self.num_boxes, 6), (self.num_preys, 13), (self.num_predators, 13), (1, 13)]
         obs_split = np.cumsum([0] + [n*m for n, m in self.obs_split])
         self.obs_predator_index = slice(obs_split[2], obs_split[3])
@@ -402,7 +410,7 @@ class PredatorPrey(QuadrotorBase):
             randperm = torch.randperm(len(self.grid_avail), device=self.device)
             num_samples = len(env_ids)*self.num_agents
             sample_idx = randperm[torch.arange(num_samples).reshape(len(env_ids), self.num_agents)%len(self.grid_avail)]
-            self.root_positions[:, self.env_actor_index["drone"]] = self.grid_centers[sample_idx]
+            self.root_positions[env_ids, self.env_drone_slice] = self.grid_centers[sample_idx]
         
             # self.task_config["spawn_pos_idx"][env_ids] = sample_idx
         self.on_reset(reset_actors)
@@ -432,13 +440,13 @@ class PredatorPrey(QuadrotorBase):
         states_box[..., :3] = states_box[..., :3] - states_self[..., :3].unsqueeze(2)
         states_box = states_box.reshape(self.num_envs, self.num_agents, -1)
 
+        assert not torch.isnan(states_self).any()
         obs_tensor.append(states_box)
         obs_tensor.append(states_prey)
         obs_tensor.append(states_predator)
         obs_tensor.append(states_self)
         
         obs_tensor = torch.cat(obs_tensor, dim=-1)
-
         return {
             "next_obs@predator": obs_tensor[:, self.predator_index],
             "next_obs@prey": obs_tensor[:, self.prey_index],

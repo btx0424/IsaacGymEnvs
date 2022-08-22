@@ -7,7 +7,7 @@ class QuaternionOrder(Enum):
     XYZW = 0
     WXYZ = 1
 
-# @torch.jit.script
+@torch.jit.script
 def quaternion_to_rotation_matrix(
         quaternion: torch.Tensor
     ) -> torch.Tensor:
@@ -41,7 +41,7 @@ def quaternion_to_rotation_matrix(
 
     return matrix
 
-# @torch.jit.script
+@torch.jit.script
 def quaternion_to_euler(
         quaternion: torch.Tensor
     ) -> torch.Tensor:
