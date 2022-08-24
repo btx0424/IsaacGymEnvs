@@ -58,15 +58,6 @@ class QuadrotorBase(MultiAgentVecTask):
         self.refresh_tensors()
         self.initial_root_states = self.root_states.clone()
 
-        self._tate_tensordict = TensorDict({
-            "root_states": self.root_states,
-            "root_positions": self.root_positions,
-            "root_quats": self.root_quats,
-            "root_linvels": self.root_linvels,
-            "root_angvels": self.root_angvels,
-            "contact_forces": self.contact_forces,
-        }, batch_size=self.num_envs)
-
         self.forces = torch.zeros(
             (self.num_envs, self.bodies_per_env, 3), dtype=torch.float32, device=self.device, requires_grad=False)
         self.z_torques = torch.zeros(
@@ -83,11 +74,6 @@ class QuadrotorBase(MultiAgentVecTask):
         self.act_type = cfg["env"].get("actType", "pid_vel")
         self.create_act_space_and_processor(self.act_type)
 
-        def reset_controllers_and_actors(_, env_ids):
-            self.controller.reset_idx(env_ids, self.num_envs)
-            self.root_states[env_ids] = self.initial_root_states[env_ids]
-        
-        self.on_reset(reset_controllers_and_actors)
         self.viewer_lines = []
 
     def create_sim(self):
@@ -243,6 +229,10 @@ class QuadrotorBase(MultiAgentVecTask):
         self.gym.apply_rigid_body_force_tensors(self.sim, 
             gymtorch.unwrap_tensor(self.forces), 
             gymtorch.unwrap_tensor(self.z_torques), gymapi.LOCAL_SPACE)
+
+    def reset_actors(self, envs_done: torch.BoolTensor, **kwargs):
+        self.controller.reset_idx(envs_done, self.num_envs)
+        self.root_states[envs_done] = self.initial_root_states[envs_done]
 
     def post_physics_step(self):
         if self.viewer and self.viewer_lines:

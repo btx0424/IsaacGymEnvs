@@ -4,7 +4,7 @@ import numpy as np
 import logging
 from isaacgym import gymapi, gymtorch
 from gym import spaces
-from typing import Any, Callable, Dict, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Sequence, Tuple
 
 from torchrl.data.tensordict.tensordict import TensorDictBase
 from torchrl.data import TensorDict, CompositeSpec, NdBoundedTensorSpec, NdUnboundedContinuousTensorSpec
@@ -180,33 +180,16 @@ class TargetHard(QuadrotorBase):
         self.task_spec = cfg.get("taskSpec", ["target_speed"])
         self.shared_reward_mix = cfg.get("rewardMix", 1.) # 1: shared, 0: independent
 
-        def reset_actors(_, env_ids: torch.Tensor):
-            self.root_positions[env_ids, self.env_actor_index["target"]] = torch.tensor([0, 0, 0.5], device=self.device)
-            self.root_linvels[env_ids, self.env_actor_index["target"]] = 0
-
-            randperm = torch.randperm(len(self.grid_avail), device=self.device)
-            num_samples = env_ids.numel() * self.num_agents
-            sample_idx = randperm[torch.arange(num_samples).reshape(len(env_ids), self.num_agents)%len(self.grid_avail)]
-            index_slice = slice(self.env_actor_index["drone"][0], self.env_actor_index["drone"][-1]+1)
-            self.root_positions[env_ids, index_slice] = self.grid_centers[sample_idx]
-            if "spawn_pos" in self.task_spec:
-                self.task_config["spawn_pos_idx"][env_ids] = sample_idx
-
-        self.on_reset(reset_actors)
-
-        self.task_config = self.extras["task_config"] = TensorDict({
-            "spawn_pos_idx": torch.zeros(self.num_envs, self.num_agents, dtype=int, device=self.device),
-            "target_speed": self.target_speeds
-        }, batch_size=self.num_envs)
-
         if isinstance(self.target_speed, Sequence):
             assert len(self.target_speed) == 2 and self.target_speed[0] <= self.target_speed[1], "Invalid target speed range"
             logging.info(f"Sample target speed from range: {self.target_speed}")
-            def sample_speed(_, env_ids):
-                self.target_speeds[env_ids] = uniform(len(env_ids), self.target_speed[0], self.target_speed[1], self.device)
-            self.reset_callbacks.append(sample_speed)
+            self.target_speed_dist = torch.distributions.Uniform(
+                torch.tensor(float(self.target_speed[0]), device=self.device), 
+                torch.tensor(float(self.target_speed[1]), device=self.device))
         else:
-            self.target_speeds *= self.target_speed
+            class Fixed:
+                def sample(_, size): return torch.ones(n, device=self.device) * self.target_speed
+            self.target_speed_dist = Fixed()
         
         num_obs = 6*self.num_boxes + 13*self.num_agents + 13 + 13
         ones = np.ones(num_obs)
@@ -218,18 +201,45 @@ class TargetHard(QuadrotorBase):
         }) 
         self.action_spec = NdBoundedTensorSpec(-1, 1, (3,), device=self.device)
 
+        self.extras["task"] = torch.empty_like(self.root_states)
+
     def allocate_buffers(self):
         super().allocate_buffers()
         self.captured_steps_buf = torch.zeros(self.num_envs, device=self.device)
         self.target_distance_buf = torch.zeros(
             (self.num_envs, self.num_agents), device=self.device)
         
-        def reset_buffers(_, env_ids):
-            self.captured_steps_buf[env_ids] = 0
-            self.target_distance_buf[env_ids] = 0
-        self.on_reset(reset_buffers)
-    
-    def compute_reward_and_done(self, tensordict: TensorDictBase):
+    def reset_buffers(self, envs_done, **kwargs):
+        super().reset_buffers(envs_done)
+        self.captured_steps_buf[envs_done] = 0
+        self.target_distance_buf[envs_done] = 0
+
+    def reset_actors(self, envs_done: torch.BoolTensor, **kwargs):
+        super().reset_actors(envs_done, **kwargs)
+        done_envs = envs_done.sum().item()
+
+        if "task_buffer" in kwargs.keys():
+            task_buffer: List[torch.Tensor] = kwargs["task_buffer"]
+            tasks_valid = envs_done & (self.extras["episode"]["success@predator"] > 0.3) & (self.extras["episode"]["success@predator"] < 0.7)
+            task_buffer.extend(list(self.extras["task"][tasks_valid].unbind(0)))
+            task_buffer = task_buffer[-kwargs.get("task_buffer_size", self.num_envs):]
+        if "task_buffer" in kwargs.keys() and len(kwargs["task_buffer"]) > 0 and np.random.random() < kwargs.get("sample_task_p"):
+            states = np.random.sample(kwargs["task_buffer"], done_envs)
+            self.root_states[envs_done] = torch.stack(states)
+        else:
+            self.root_linvels[envs_done, self.env_actor_index["target"]] = 0
+            self.root_positions[envs_done, self.env_actor_index["target"]] = torch.tensor([0, 0, 0.5], device=self.device)
+
+            randperm = torch.randperm(len(self.grid_avail), device=self.device)
+            num_samples = done_envs * self.num_agents
+            sample_idx = randperm[torch.arange(num_samples).reshape(done_envs, self.num_agents)%len(self.grid_avail)]
+            index_slice = slice(self.env_actor_index["drone"][0], self.env_actor_index["drone"][-1]+1)
+            self.root_positions[envs_done, index_slice] = self.grid_centers[sample_idx]
+            self.target_speeds[envs_done] = self.target_speed_dist.sample((done_envs,))
+        
+        self.extras["task"][envs_done] = self.root_states[envs_done]
+
+    def compute_reward_and_done(self, **kwargs):
         pos, quat, vel, angvel = self.quadrotor_states.values()
             
         contact = self.contact_forces[:, self.env_body_index["base"]]
@@ -261,7 +271,9 @@ class TargetHard(QuadrotorBase):
             "reward_distance@predator": cum_reward[..., 0],
             "reward_collision@predator": cum_reward[..., 1],
             "reward_capture@predator": cum_reward[..., 2],
-            "success@predator": (self.captured_steps_buf > self.success_threshold).float(),
+            "success@predator": (self.captured_steps_buf / self.success_threshold),
+
+            "target_speed": self.target_speeds.clone(),
             "length": self.progress_buf + 1,
         })
 
@@ -271,7 +283,7 @@ class TargetHard(QuadrotorBase):
             "env_done": self.reset_buf.all(-1)
         }, batch_size=self.batch_size)
     
-    def compute_state_and_obs(self, tensordict: TensorDictBase):
+    def compute_state_and_obs(self, **kwargs):
         obs_tensor = []
         identity = torch.eye(self.num_agents, device=self.device, dtype=bool)
         states_self = self.root_states[:, self.env_actor_index["drone"]]
@@ -353,18 +365,6 @@ class TargetHard(QuadrotorBase):
             target_pos = self.target_pos[0].expand_as(quadrotor_pos)
             points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
             self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
-    
-    def set_tasks(self, 
-            env_ids: torch.Tensor, 
-            task_config: TensorDictBase,
-            env_states: torch.Tensor):
-        if "spawn_pos" in self.task_spec:
-            spawn_pos_idx = task_config["spawn_pos_idx"]
-            drone_positions = env_states[:, self.env_actor_index["drone"], :3]
-            drone_positions[:] = self.grid_centers[spawn_pos_idx]
-        if "target_speed" in self.task_spec:
-            target_speed = task_config["target_speed"]
-            self.target_speeds[env_ids] = target_speed.squeeze()
 
     def get_dummy_policy(self, *args, **kwargs) -> Callable:
         def dummy_policy(tensordict: TensorDict):
@@ -466,12 +466,10 @@ class PredatorPrey(QuadrotorBase):
         self.captured_steps_buf[captured] += 1
 
         self.rew_buf[:, self.predator_index, 0] = distance_reward.mean(1)
-        self.rew_buf[:, self.prey_index, 0] = -distance_reward.sum(1)
+        self.rew_buf[:, self.prey_index, 0] = - distance_reward.sum(1)
 
-        self.rew_buf[..., 1] = -collision_penalty
-        self.rew_buf[self.quadrotor_pos[..., 2]>self.MAX_XYZ[2], 1] -= 1
-        self.rew_buf[..., 1] *= 2
-        
+        self.rew_buf[..., 1] = - collision_penalty - (self.quadrotor_pos[..., 2]>self.MAX_XYZ[2]).float()
+
         self.rew_buf[:, self.predator_index, 2] = captured.float()
         self.rew_buf[:, self.prey_index, 2] = -captured.float()
         
@@ -485,13 +483,13 @@ class PredatorPrey(QuadrotorBase):
 
         cum_rew_buf = self.cum_rew_buf.clone()
         self.extras["episode"].update({
-            "reward/distance@predator": cum_rew_buf[..., self.predator_index, 0],
-            "reward/collision@predator": cum_rew_buf[..., self.predator_index, 1],
-            "reward/capture@predator": cum_rew_buf[..., self.predator_index, 2],
+            "reward_distance@predator": cum_rew_buf[:, self.predator_index, 0],
+            "reward_collision@predator": cum_rew_buf[:, self.predator_index, 1],
+            "reward_capture@predator": cum_rew_buf[:, self.predator_index, 2],
 
-            "reward/distance@prey": cum_rew_buf[..., self.prey_index, 0],
-            "reward/collision@prey": cum_rew_buf[..., self.prey_index, 1],
-            "reward/capture@prey": cum_rew_buf[..., self.prey_index, 2],
+            "reward_distance@prey": cum_rew_buf[:, self.prey_index, 0],
+            "reward_collision@prey": cum_rew_buf[:, self.prey_index, 1],
+            "reward_capture@prey": cum_rew_buf[:, self.prey_index, 2],
 
             "length": self.progress_buf + 1,
             "success": (self.captured_steps_buf > self.success_threshold).float(),

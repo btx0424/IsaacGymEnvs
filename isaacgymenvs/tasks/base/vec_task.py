@@ -44,7 +44,7 @@ import sys
 
 import abc
 from abc import ABC, abstractmethod
-from torchrl.data.tensordict.tensordict import TensorDictBase, TensorDict
+from torchrl.data.tensordict.tensordict import TensorDictBase, TensorDict, functools
 
 from torchrl.envs.utils import step_tensordict
 
@@ -754,8 +754,8 @@ class VecTask(Env):
 
         self.first_randomization = False
 
-from torchrl.envs.common import _EnvClass
-class MultiAgentVecTask(VecTask, _EnvClass):
+from tqdm import tqdm
+class MultiAgentVecTask(VecTask):
 
     # gym version compatibility ...
     metadata = {"render_modes": ["human", "rgb_array"], "render_fps": 24}
@@ -765,7 +765,6 @@ class MultiAgentVecTask(VecTask, _EnvClass):
     
     def __init__(self, config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture: bool = False, force_render: bool = False):
         self.num_rewards = config["env"].get("numRewards", 1)
-        self.reset_callbacks = []
         
         super().__init__(config, rl_device, sim_device, graphics_device_id, headless, virtual_screen_capture, force_render)
         
@@ -777,6 +776,17 @@ class MultiAgentVecTask(VecTask, _EnvClass):
         self.reward_space = spaces.Box(-np.inf, np.inf, shape=(self.num_rewards,))
 
         self.batch_size = torch.Size([self.num_envs,])
+        self._training = True
+    
+    def train(self, mode: bool = True):
+        self._training = mode
+        return self
+
+    def eval(self):
+        self._training = False
+
+    def training(self):
+        return self._training
 
     def allocate_buffers(self):
         # allocate buffers
@@ -799,24 +809,21 @@ class MultiAgentVecTask(VecTask, _EnvClass):
         self.randomize_buf = torch.zeros(
             self.num_envs, device=self.device, dtype=torch.long)
         self.extras = {"episode": TensorDict({}, batch_size=[self.num_envs,])}
-        
-        def reset_buffers(_, env_ids):
-            self.progress_buf[env_ids] = 0
-            self.cum_rew_buf[env_ids] = 0
-            self.reset_buf[env_ids] = 0
+            
+    def reset_buffers(self, envs_done: torch.BoolTensor, **kwargs):
+        self.progress_buf[envs_done] = 0
+        self.cum_rew_buf[envs_done] = 0
+        self.reset_buf[envs_done] = 0
+    
+    def reset_actors(self, envs_done: torch.BoolTensor, **kwargs):
+        ...
 
-        self.on_reset(reset_buffers)
-    
-    def agents_step(self, 
-            action_dict: Dict[str, torch.Tensor]
-        ) -> Tuple[Dict[str, Tuple[Any, torch.Tensor, torch.Tensor]], Dict[str, Any]]:
-        raise NotImplementedError
-    
     def rollout(
         self,
         max_steps: Optional[int]=None,
         max_episodes: Optional[int]=None,
         policy: Optional[Callable[[TensorDictBase], TensorDictBase]] = None,
+        step_kwargs: Optional[Dict[str, Any]]=None,
         callback = None, #: Optional[Callable[[TensorDictBase, ...], TensorDictBase]] = None,
         tensordict: Optional[TensorDictBase] = None,
         verbose: bool = False,
@@ -825,81 +832,87 @@ class MultiAgentVecTask(VecTask, _EnvClass):
         episodes = 0
         if max_steps is not None and max_episodes is None:
             terminate = lambda: steps >= max_steps
+            total = max_steps
         elif max_steps is None and max_episodes is not None:
             terminate = lambda: episodes >= max_episodes
+            total = max_episodes
         else:
             raise ValueError("Either max_steps or max_episodes must be specified but not both")
 
+        step_kwargs = step_kwargs or {}
+
         if tensordict is None:
             logging.warning("No tensordict provided as init obs, resetting env.")
-            tensordict = self.reset()
+            tensordict = self.reset(**step_kwargs)
         
+        if verbose:
+            t = tqdm(total=total, desc="rollout")
+
         while not terminate():
             tensordict = policy(tensordict)
-            tensordict = self.step(tensordict)
+            tensordict = self.step(tensordict, **step_kwargs)
             if callback is not None:
                 callback(self, tensordict, steps)
             tensordict = step_tensordict(tensordict, keep_other=True)
             
+            ep_dones =  tensordict["env_done"].sum().item()
             steps += 1
-            episodes += tensordict["env_done"].sum()
+            episodes += ep_dones
+
+            if verbose:
+                t.update(1 if max_steps else ep_dones)
         
         return tensordict
 
-    def step(self, tensordict: TensorDictBase) -> TensorDictBase:
+    def step(self, tensordict: TensorDictBase, **kwargs) -> TensorDictBase:
         self.pre_physics_step(tensordict)
         for i in range(self.control_freq_inv):
             if self.force_render:
                 self.render()
             self.gym.simulate(self.sim)
-        
         self.progress_buf += 1
         self.refresh_tensors()
         self.post_physics_step()
-        reward_and_done_td = self.compute_reward_and_done(tensordict)
-        self.reset_done()
-        state_and_obs_td = self.compute_state_and_obs(tensordict)
+        reward_and_done_td = self.compute_reward_and_done(**kwargs)
+        self.reset_done(**kwargs)
+        state_and_obs_td = self.compute_state_and_obs(**kwargs)
         
         tensordict.update(reward_and_done_td)
         tensordict.update(state_and_obs_td)
         return tensordict
 
-    def reset(self, tensordict: Optional[TensorDictBase]=None) -> TensorDictBase:
+    def reset(self, tensordict: Optional[TensorDictBase]=None, **kwargs) -> TensorDictBase:
         self.reset_buf.fill_(1)
-        self.reset_done()
-        if tensordict is None:
-            tensordict = TensorDict({}, batch_size=self.batch_size)
-        state_and_obs_td = self.compute_state_and_obs(tensordict)
+        self.reset_done(**kwargs)
+        tensordict = TensorDict({}, batch_size=self.batch_size)
+        state_and_obs_td = self.compute_state_and_obs(**kwargs)
         assert tensordict is not state_and_obs_td
         tensordict.update(state_and_obs_td)
         tensordict = step_tensordict(tensordict, keep_other=True)
         return tensordict
 
     @abstractmethod
-    def compute_reward_and_done(self, tensordict: TensorDictBase) -> TensorDictBase:
+    def compute_reward_and_done(self, **kwargs) -> TensorDictBase:
         ...
     
     @abstractmethod
-    def compute_state_and_obs(self, tensordict: TensorDictBase) -> TensorDictBase:
+    def compute_state_and_obs(self, **kwargs) -> TensorDictBase:
         ...
 
-    def on_reset(self, callback):
-        self.reset_callbacks.append(callback)
-
-    def reset_done(self):
-        env_ids = self.reset_buf.all(-1).nonzero(as_tuple=False).squeeze(-1)
-        if len(env_ids) > 0:
-            for callback in self.reset_callbacks:
-                callback(self, env_ids)
-            root_reset_ids = self.sim_actor_index["__all__"][env_ids].flatten()
-            self.gym.set_actor_root_state_tensor_indexed(
-                self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
-        self.refresh_tensors()
-    
     @abstractmethod
     def refresh_tensors():
         ...
-        
+
+    def reset_done(self, **kwargs):
+        envs_done = self.reset_buf.all(-1)
+        if len(envs_done) > 0:
+            self.reset_buffers(envs_done, **kwargs)
+            self.reset_actors(envs_done, **kwargs)
+            root_reset_ids = self.sim_actor_index["__all__"][envs_done].flatten()
+            self.gym.set_actor_root_state_tensor_indexed(
+                self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
+        self.refresh_tensors()
+
     def get_dummy_policy(self, *args, **kwargs):
         raise NotImplementedError
         

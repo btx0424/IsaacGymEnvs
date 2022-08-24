@@ -44,7 +44,6 @@ def main(cfg):
             project=cfg.wandb_project,
             group=cfg.wandb_group,
             entity=cfg.wandb_entity,
-            config=OmegaConf.to_container(cfg, resolve=True),
             monitor_gym=True,
             name=run_name,
             resume="allow",
@@ -56,7 +55,6 @@ def main(cfg):
             project=cfg.wandb_project,
             group=cfg.wandb_group,
             entity=cfg.wandb_entity,
-            config=OmegaConf.to_container(cfg, resolve=True),
             monitor_gym=True,
             name=run_name,
             resume="allow",
@@ -66,6 +64,8 @@ def main(cfg):
     else:
         raise ValueError("Must provide a resume_id or run_path to eval!")
     
+    run.config.update(OmegaConf.to_container(cfg, resolve=True))
+
     envs: MultiAgentVecTask = create_envs(cfg)
     if cfg.capture_video:
         envs.is_vector_env = True

@@ -2,7 +2,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 import logging
 import time
-from typing import Any, Callable, Dict, Tuple, Union, List
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union, List
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from isaacgymenvs.tasks.quadrotor import QuadrotorBase
 import numpy as np
@@ -84,6 +84,7 @@ class DroneRunner(Runner):
         self.max_env_steps = cfg.max_env_steps
         self.log_interval = cfg.log_interval
         self.eval_interval = cfg.eval_interval
+        self.save_interval = 200
         self.eval_episodes = cfg.eval_episodes
 
         self.use_cl = cfg.use_cl
@@ -132,15 +133,12 @@ class DroneRunner(Runner):
         self.total_episodes = 0
         self.episodes_this_run = 0
 
-        if self.use_cl:
-            self.task_difficulty_collate_fn = lambda episode_infos: episode_infos["reward_capture"].mean(-1)
-
     def run(self):
         self.training = True
         tensordict = self.envs.reset()
         episode_infos = defaultdict(list)
 
-        metric_key = "train/reward_capture@predator_mean"
+        metric_key = "train/success@predator"
         if "best_" + metric_key not in wandb.run.summary.keys(): 
             wandb.run.summary["best_" + metric_key] = 0
         
@@ -180,7 +178,15 @@ class DroneRunner(Runner):
                 for k, v in env.extras["episode"][env_done].items():
                     episode_infos[k].extend(v.tolist())
                 self.total_episodes += env_done.sum().item()
+        
+        step_kwargs = {}
+        if self.use_cl:
+            self.tasks: List[torch.Tensor] = []
+            step_kwargs["task_buffer"] = self.tasks
+            step_kwargs["task_buffer_size"] = self.num_envs
+            step_kwargs["sample_task_p"] = 0.5
 
+        self.envs.train()
         for iteration in range(self.max_iterations):
             iter_start = time.perf_counter()
             for agent_type, policy in self.policies.items():
@@ -190,9 +196,9 @@ class DroneRunner(Runner):
                     tensordict=tensordict,
                     max_steps=self.num_steps, 
                     policy=joint_policy, 
+                    step_kwargs=step_kwargs,
                     callback=step_callback)
             rollout_end = time.perf_counter()
-            self.compute()
             train_infos = self.train()
             iter_end = time.perf_counter()
 
@@ -211,7 +217,7 @@ class DroneRunner(Runner):
                 episode_infos.clear()
 
             if self.eval_interval > 0 and iteration % self.eval_interval == 0:
-                self.eval(self.eval_episodes, log=True, pbar=False)
+                self.eval(self.eval_episodes, log=True, verbose=False)
                 tensordict = self.envs.reset()
                 init_buffer(tensordict)
 
@@ -221,192 +227,31 @@ class DroneRunner(Runner):
                 ):
                 wandb.run.summary[f"best_{metric_key}"] = train_infos.get(metric_key)
                 logging.info(f"Saving best model with {metric_key}: {wandb.run.summary[f'best_{metric_key}']}")
-                self.save()
+                self.save(tag="best", info=train_infos)
+            
+            if self.save_interval > 0 and iteration % self.save_interval == 0:
+                self.save(info=train_infos)
 
             if self.env_steps_this_run > self.max_env_steps:
                 wandb.run.summary["env_step"] = self.total_env_steps
                 wandb.run.summary["episode"] = self.total_episodes
                 wandb.run.summary["iteration"] = iteration
+                self.save(tag="end")
                 break
 
         return wandb.run.summary
 
-        distributions = defaultdict(list)
-
-        # setup CL
-        if self.use_cl:
-            tasks = TaskDist(capacity=16384)
-            def sample_task(envs, env_ids, env_states: torch.Tensor):
-                # z = (1-self.env_steps_this_run / self.max_env_steps)*0.7
-                z = 0.3
-                if self.training and len(tasks) > 0:
-                    p = np.random.rand()
-                    if p < z:
-                        sampled_tasks = tasks.sample(len(env_ids), "hard")
-                        if sampled_tasks is not None:
-                            envs.set_tasks(env_ids, sampled_tasks, env_states)
-                    else:
-                        pass # leave the envs to use new tasks
-
-            self.envs.reset_callbacks.append(sample_task)
-
-        start = time.perf_counter()
-        _last_log = time.perf_counter()
-
-        for iteration in range(self.max_iterations):
-
-            for step in range(self.num_steps):
-                # Sample actions
-                _step_start = time.perf_counter()
-
-                # tensors by agent
-                action_dict = TensorDict()
-                action_log_prob_dict = TensorDict()
-                value_dict = TensorDict()
-
-                for agent, agent_obs_dict in obs_dict.items():
-                    policy: MAPPOPolicy = self.policies[agent]
-                    policy.prep_rollout()
-                    rnn_state_actor, rnn_state_critic = rnn_states_dict[agent]                 
-                    masks = masks_dict[agent]
-                    with torch.no_grad():
-                        assert not torch.isnan(agent_obs_dict["obs"]).any()
-                        result_dict = policy.get_action_and_value(
-                            share_obs=agent_obs_dict["state"].flatten(end_dim=1),
-                            obs=agent_obs_dict["obs"].flatten(end_dim=1),
-                            rnn_states_actor=rnn_state_actor,
-                            rnn_states_critic=rnn_state_critic,
-                            masks=masks
-                        )
-                    action_dict[agent] = result_dict["action"]
-                    action_log_prob_dict[agent] = result_dict["action_log_prob"]
-                    value_dict[agent] = result_dict["value"]
-                    rnn_states_dict[agent] = (result_dict["rnn_state_actor"], result_dict["rnn_state_critic"])
-
-                _inf_end = time.perf_counter()
-                step_result_dict, infos = self.envs.agents_step(action_dict)
-                env_dones: torch.Tensor = infos["env_dones"]
-                _env_end = time.perf_counter()
-
-                for agent, (agent_obs_dict, agent_reward, agent_done) in step_result_dict.items():
-                    # TODO: complete reward shaping
-                    agent_reward = agent_reward.sum(-1)
-                    
-                    obs_dict[agent] = agent_obs_dict
-                    masks_dict[agent] = (1.0 - agent_done).reshape(self.num_envs * self.num_agents[agent], 1)
-
-                    buffer = self.buffers.get(agent)
-                    if buffer:
-                        num_agents = self.num_agents[agent]
-                        data = (
-                            agent_obs_dict["obs"].reshape(self.num_envs, num_agents, -1),
-                            agent_reward.reshape(self.num_envs, num_agents, 1),
-                            agent_done.reshape(self.num_envs, num_agents, 1),
-                            value_dict[agent].reshape(self.num_envs, num_agents, 1),
-                            action_dict[agent].reshape(self.num_envs, num_agents, -1),
-                            action_log_prob_dict[agent].reshape(self.num_envs, num_agents, -1),
-                            rnn_states_dict[agent][0],
-                            rnn_states_dict[agent][1]
-                        )
-                        self.insert(data, buffer)
-
-                # record statistics
-                if env_dones.any():
-                    episode_info = infos["episode"][env_dones]
-                    task_config: TensorDict = infos.get("task_config")
-                    for k, v in episode_info.items():
-                        episode_infos[k].extend(v.tolist())
-
-                    if self.use_cl:
-                        metrics = self.task_difficulty_collate_fn(episode_info)
-                        tasks.add(task_config=task_config[env_dones], metrics=metrics)
-
-                    if task_config is not None:
-                        for k, v in task_config[env_dones].items():
-                            if v.squeeze(-1).dim() == 1: # e.g., target_speed
-                                distributions[k].extend(v.squeeze(-1).tolist())
-
-                    self.total_episodes += env_dones.sum()
-
-                self.inf_step_time += _inf_end - _step_start
-                self.env_step_time += _env_end - _inf_end
-            
-            # compute return and update network
-            self.compute()
-            _train_start = time.perf_counter()
-            train_infos = self.train()
-            _train_end = time.perf_counter()
-            self.train_time += _train_end - _train_start
-
-            self.total_env_steps += self.num_steps * self.num_envs
-            self.env_steps_this_run += self.num_steps * self.num_envs
-
-            # log information
-            if iteration % self.log_interval == 0:
-                fps = (self.num_steps * self.num_envs * self.log_interval) / (time.perf_counter() - _last_log)
-                progress_str = f"iteration: {iteration}/{self.max_iterations}, env steps: {self.total_env_steps}, episodes: {self.total_episodes}"
-                performance_str = f"runtime: {self.env_step_time:.2f} (env), {self.inf_step_time:.2f} (inference), {self.train_time:.2f} (train), {time.perf_counter()-start:.2f} (total), fps: {fps:.2f}"
-                
-                logging.info(progress_str)
-                logging.info(performance_str)
-
-                train_infos.update(collect_episode_infos(episode_infos, "train"))
-                episode_infos.clear()
-
-                for k, v in distributions.items():
-                    v = np.array(v).reshape(-1)
-                    np_histogram = np.histogram(v, density=True)
-                    train_infos[f"train/{k}_distribution"] = wandb.Histogram(np_histogram=np_histogram)
-                distributions.clear()
-
-                train_infos["env_step"] = self.total_env_steps
-                train_infos["episode"] = self.total_episodes
-                train_infos["iteration"] = iteration
-                train_infos["fps"] = fps
-
-                if self.use_cl:
-                    logging.info(f"Num of tasks: {len(tasks)}")
-                    if len(tasks) > 0:
-                        train_infos["train/task_buffer_difficulty"] = wandb.Histogram(tasks.metrics.cpu().numpy())
-                    
-                self.log(train_infos)
-
-                if train_infos.get(f"train/{metric}", wandb.run.summary["best_" + metric]) > wandb.run.summary["best_" + metric]:
-                    wandb.run.summary["best_" + metric] = train_infos.get(f"train/{metric}")
-                    logging.info(f"Saving best model with {metric}: {wandb.run.summary['best_' + metric]}")
-                    self.save()
-                
-                _last_log = time.perf_counter()
-
-            if self.eval_interval > 0 and iteration % self.eval_interval == 0:
-                self.training = False
-                self.eval(self.eval_episodes)
-                for agent, policy in self.policies.items():
-                    policy.actor.train()
-                    policy.critic.train()
-                self.training = True
-
-            if self.env_steps_this_run > self.max_env_steps:
-                wandb.run.summary["env_step"] = self.total_env_steps
-                wandb.run.summary["episode"] = self.total_episodes
-                wandb.run.summary["iteration"] = iteration
-                break
-
-    @torch.no_grad()
-    def compute(self):
-        for agent, policy in self.policies.items():
-            buffer = self.buffers.get(agent)
-            next_values = policy.get_values(
-                buffer.share_obs[-1].flatten(end_dim=1),
-                buffer.rnn_states_critic[-1],
-                buffer.masks[-1].flatten(end_dim=1))
-            next_values = next_values.reshape(self.num_envs, self.num_agents[agent], 1)
-            buffer.compute_returns(next_values, policy.value_normalizer)
-    
     def train(self) -> Dict[str, Any]:
         train_infos = {}
         for agent_type, policy in self.policies.items():
             buffer = self.buffers[agent_type]
+            with torch.no_grad():
+                next_values = policy.get_values(
+                    buffer.share_obs[-1].flatten(end_dim=1),
+                    buffer.rnn_states_critic[-1],
+                    buffer.masks[-1].flatten(end_dim=1))
+                next_values = next_values.reshape(self.num_envs, self.num_agents[agent_type], 1)
+                buffer.compute_returns(next_values, policy.value_normalizer)
             policy.prep_training()
             train_infos[agent_type] = policy.train(buffer)      
             buffer.after_update()
@@ -417,21 +262,32 @@ class DroneRunner(Runner):
         info["env_step"] = self.total_env_steps
         wandb.log(info)
 
-    def save(self):
+    def save(self, tag: Optional[str]=None, info: Optional[Dict[str, Any]]=None):
         logging.info(f"Saving models to {wandb.run.dir}")
         checkpoint = {}
-        for agent, policy in self.policies.items():
-            checkpoint[agent] = {
+        for agent_type, policy in self.policies.items():
+            checkpoint[agent_type] = {
                 "actor": policy.actor.state_dict(),
                 "critic": policy.critic.state_dict(),
             }
         checkpoint["episodes"] = self.total_episodes
         checkpoint["env_steps"] = self.total_env_steps
-        torch.save(checkpoint, os.path.join(wandb.run.dir, "checkpoint.pt"))
 
-    def restore(self, reset_steps=False):
+        if tag is not None:
+            checkpoint_name = f"checkpoint_{tag}.pt"
+        else:
+            checkpoint_name = f"checkpoint_{self.total_env_steps}"
+
+        torch.save(checkpoint, os.path.join(wandb.run.dir, checkpoint_name))
+
+    def restore(self, reset_steps=False, tag: Optional[str]=None):
         logging.info(f"Restoring models from {wandb.run.dir}")
-        checkpoint = torch.load(os.path.join(wandb.run.dir, "checkpoint.pt"), map_location=self.device)
+        if tag is not None:
+            checkpoint_name = f"checkpoint_{tag}.pt"
+        else:
+            checkpoint_name = "checkpoint.pt"
+
+        checkpoint = torch.load(os.path.join(wandb.run.dir, checkpoint_name), map_location=self.device)
         for agent, policy in self.policies.items():
             policy.actor.load_state_dict(checkpoint[agent]["actor"])
             policy.critic.load_state_dict(checkpoint[agent]["critic"])
@@ -446,6 +302,7 @@ class DroneRunner(Runner):
             policy.prep_rollout()
 
         episode_infos = defaultdict(list)
+
         def step_callback(env, tensordict, step):
             env_done = tensordict["env_done"].squeeze(-1)
             if env_done.any():
@@ -461,13 +318,28 @@ class DroneRunner(Runner):
                 tensordict[f"actions@{agent_type}"] = actions
             return tensordict
 
+        self.envs.eval()
         with torch.no_grad():
-            self.envs.rollout(max_episodes=eval_episodes, policy=eval_policy, callback=step_callback)
+            self.envs.rollout(max_episodes=eval_episodes, policy=eval_policy, callback=step_callback, verbose=verbose)
 
         eval_infos = {"env_step": self.total_env_steps}
         eval_infos.update(collect_episode_infos(episode_infos, "eval"))
-        
+        if "target_speed" in episode_infos.keys():
+            import plotly.express as px
+            import pandas as pd
+            df = pd.DataFrame({
+                "target_speed": np.array(episode_infos["target_speed"]).flatten(),
+                "success": np.array(episode_infos["success@predator"]).flatten()
+                })
+            fig = px.density_heatmap(df, x="target_speed", y="success", marginal_x="histogram", marginal_y="histogram")
+            wandb.log({"hist": fig})
         if log:
             self.log(eval_infos)
         return eval_infos
 
+def update_recursive_(a: Dict, b: Dict):
+    for k, v in b.items():
+        if isinstance(a.get(k), Dict) and isinstance(v, Dict):
+            update_recursive_(a[k], v)
+        else:
+            a[k] = v
