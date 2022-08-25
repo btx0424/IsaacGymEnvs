@@ -1,5 +1,5 @@
 project: isaacgymenvs
-name: reward_mix
+name: test_cl
 program: train_mappo.py
 
 method: grid
@@ -15,6 +15,9 @@ parameters:
   
   task.rewardMix:
     values: [1, 0.6, 0.3, 0]
+
+  use_cl:
+    values: [True, False]
 
   seed:
     values: [123, 456]
@@ -36,7 +39,7 @@ parameters:
 
   wandb_name:
     values:
-      - reward_mix
+      - test_cl
 
 command:
   - ${env}

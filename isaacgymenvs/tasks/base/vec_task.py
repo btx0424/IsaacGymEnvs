@@ -911,7 +911,7 @@ class MultiAgentVecTask(VecTask):
             root_reset_ids = self.sim_actor_index["__all__"][envs_done].flatten()
             self.gym.set_actor_root_state_tensor_indexed(
                 self.sim, self.root_tensor, gymtorch.unwrap_tensor(root_reset_ids), len(root_reset_ids))
-        self.refresh_tensors()
+            self.refresh_tensors()
 
     def get_dummy_policy(self, *args, **kwargs):
         raise NotImplementedError

@@ -220,12 +220,12 @@ class TargetHard(QuadrotorBase):
 
         if "task_buffer" in kwargs.keys():
             task_buffer: List[torch.Tensor] = kwargs["task_buffer"]
-            tasks_valid = envs_done & (self.extras["episode"]["success@predator"] > 0.3) & (self.extras["episode"]["success@predator"] < 0.7)
+            tasks_valid = envs_done & (self.extras["episode"]["success@predator"] > 0.3).squeeze() & (self.extras["episode"]["success@predator"] < 0.7).squeeze()
             task_buffer.extend(list(self.extras["task"][tasks_valid].unbind(0)))
             task_buffer = task_buffer[-kwargs.get("task_buffer_size", self.num_envs):]
         if "task_buffer" in kwargs.keys() and len(kwargs["task_buffer"]) > 0 and np.random.random() < kwargs.get("sample_task_p"):
-            states = np.random.sample(kwargs["task_buffer"], done_envs)
-            self.root_states[envs_done] = torch.stack(states)
+            task_buffer = torch.stack(kwargs["task_buffer"])
+            self.root_states[envs_done] = task_buffer[torch.randint(len(task_buffer), size=(done_envs,))]
         else:
             self.root_linvels[envs_done, self.env_actor_index["target"]] = 0
             self.root_positions[envs_done, self.env_actor_index["target"]] = torch.tensor([0, 0, 0.5], device=self.device)
@@ -311,8 +311,8 @@ class TargetHard(QuadrotorBase):
             "next_state": obs_tensor,
         }, batch_size=self.num_envs)
               
-    def step(self, tensordict: TensorDictBase) -> TensorDictBase:
-        step_result = super().step(TensorDict({"actions": tensordict["actions@predator"]}, batch_size=self.num_envs))
+    def step(self, tensordict: TensorDictBase, **kwargs) -> TensorDictBase:
+        step_result = super().step(TensorDict({"actions": tensordict["actions@predator"]}, batch_size=self.num_envs), **kwargs)
         step_result.del_("actions")
         tensordict.update(step_result)
         return tensordict
