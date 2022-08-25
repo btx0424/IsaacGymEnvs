@@ -197,7 +197,7 @@ class MAPPOPolicy:
         else:
             policy_loss = -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
         
-        policy_loss = policy_loss + self.entropy_coef * dist_entropy
+        policy_loss = policy_loss - self.entropy_coef * dist_entropy
         value_loss = self.cal_value_loss(self.value_normalizer, values, value_preds_batch, return_batch, active_masks_batch)
         
         # self.scaler.scale(policy_loss).backward()
