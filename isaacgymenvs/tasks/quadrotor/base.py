@@ -94,15 +94,15 @@ class QuadrotorBase(MultiAgentVecTask):
         _wall_length = 2 * spacing
         _wall_height = self.MAX_XYZ[2]
         _walls = torch.tensor([
-            [-spacing, 0, 0.5, 0.05, _wall_length, _wall_height],
-            [0, -spacing, 0.5, _wall_length, 0.05, _wall_height],
-            [spacing, 0, 0.5, 0.05, _wall_length, _wall_height],
-            [0, spacing, 0.5, _wall_length, 0.05, _wall_height]], device=self.device)
+            [-spacing, 0, _wall_height/2, 0.05, _wall_length, _wall_height],
+            [0, -spacing, _wall_height/2, _wall_length, 0.05, _wall_height],
+            [spacing, 0, _wall_height/2, 0.05, _wall_length, _wall_height],
+            [0, spacing, _wall_height/2, _wall_length, 0.05, _wall_height]], device=self.device)
         _obstacles = torch.tensor([
-            [1, 0.7, 0.5, 0.1, 0.6, _wall_height],
-            [0.7, 1, 0.5, 0.6, 0.1, _wall_height],
-            [-1, -1.3, 0.5, 0.1, 0.6, _wall_height],
-            [-1.3, -1, 0.5, 0.6, 0.1, _wall_height]
+            [1.2, 0.9, _wall_height/2, 0.1, 0.6, _wall_height],
+            [0.9, 1.2, _wall_height/2, 0.6, 0.1, _wall_height],
+            [-0.8, -1.1, _wall_height/2, 0.1, 0.6, _wall_height],
+            [-1.1, -0.8, _wall_height/2, 0.6, 0.1, _wall_height]
             ], device=self.device)
 
         self.boxes = []

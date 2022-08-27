@@ -67,7 +67,6 @@ isaacgym_task_map = {
     "HumanoidAMP": HumanoidAMP,
     "Ingenuity": Ingenuity,
     "Quadcopter": Quadcopter,
-    "QuadrotorTargetEasy": TargetEasy,
     "QuadrotorTargetHard": TargetHard,
     "QuadrotorPredatorPrey": PredatorPrey,
     "ShadowHand": ShadowHand,

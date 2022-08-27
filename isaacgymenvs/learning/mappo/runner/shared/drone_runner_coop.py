@@ -45,23 +45,24 @@ class TensorDict(Dict[str, torch.Tensor]):
 
     def flatten(self, start_dim: int = 0, end_dim: int = -1):
         return TensorDict({key: value.flatten(start_dim, end_dim) for key, value in self.items()})
-
-    def group(self, get_group: Callable[[str], Union[str, None]]):
-        groups = defaultdict(TensorDict)
-        others = TensorDict()
-        for k, v in self.items():
-            group = get_group(k)
-            if group: groups[group][k] = v
-            else: others[k] = v
-        return TensorDict(**groups), others
-
-    def group_by_agent(self):
-        return self.group(self.get_agent_group)
     
-    @staticmethod
-    def get_agent_group(k: str):
-        idx = k.find('@')
-        return k[:idx] if idx != -1 else None
+    def unflatten(self, dim, sizes):
+        return TensorDict({key: value.unflatten(dim, sizes) for key, value in self.items()})
+
+    def set(self, key, value):
+        self[key] = value
+
+def group_by_agent(tensordict: Dict[str, Any]):
+    grouped = defaultdict(dict)
+    others = {}
+    for k, v in tensordict.items():
+        k = k.split("@")
+        if len(k) > 1:
+            k, agent = k
+            grouped[agent][k] = v
+        else:
+            others[k[0]] = v
+    return grouped, others
 
 def collect_episode_infos(infos: Dict[str, List], tag: str) -> Dict:
     results = {}
@@ -181,9 +182,29 @@ class DroneRunner(Runner):
         
         step_kwargs = {}
         if self.use_cl:
-            self.tasks: List[torch.Tensor] = []
+            class TensorListBuffer:
+                def __init__(self, capacity:int=8192):
+                    self._dict = defaultdict(list)
+                    self.capacity = capacity
+                
+                def update(self, **kwargs):
+                    for k, v in kwargs.items():
+                        self._dict[k].extend(v)
+                        self._dict[k] = self._dict[k][-self.capacity:]
+                        self._len = (self._len + len(v)) % self.capacity
+                
+                def sample(self, n, keys: List[str]=None) -> Dict[str, torch.Tensor]:
+                    sample_idx = torch.randint(n)
+                    if keys is not None:
+                        return {k: torch.stack(v)[sample_idx] for k, v in self._dict if k in keys}
+                    else:
+                        return {k: torch.stack(v)[sample_idx] for k, v in self._dict}
+
+                def __len__(self):
+                    return self._len
+
+            self.tasks = TensorListBuffer()
             step_kwargs["task_buffer"] = self.tasks
-            step_kwargs["task_buffer_size"] = self.num_envs
             step_kwargs["sample_task_p"] = 0.5
 
         self.envs.train()
@@ -246,7 +267,7 @@ class DroneRunner(Runner):
         for agent_type, policy in self.policies.items():
             buffer = self.buffers[agent_type]
             with torch.no_grad():
-                next_values = policy.get_values(
+                next_values = policy.get_value(
                     buffer.share_obs[-1].flatten(end_dim=1),
                     buffer.rnn_states_critic[-1],
                     buffer.masks[-1].flatten(end_dim=1))
@@ -266,10 +287,7 @@ class DroneRunner(Runner):
         logging.info(f"Saving models to {wandb.run.dir}")
         checkpoint = {}
         for agent_type, policy in self.policies.items():
-            checkpoint[agent_type] = {
-                "actor": policy.actor.state_dict(),
-                "critic": policy.critic.state_dict(),
-            }
+            checkpoint[agent_type] = policy.state_dict()
         checkpoint["episodes"] = self.total_episodes
         checkpoint["env_steps"] = self.total_env_steps
 
@@ -288,9 +306,8 @@ class DroneRunner(Runner):
             checkpoint_name = "checkpoint.pt"
 
         checkpoint = torch.load(os.path.join(wandb.run.dir, checkpoint_name), map_location=self.device)
-        for agent, policy in self.policies.items():
-            policy.actor.load_state_dict(checkpoint[agent]["actor"])
-            policy.critic.load_state_dict(checkpoint[agent]["critic"])
+        for agent_type, policy in self.policies.items():
+            policy.load_state_dict(checkpoint[agent_type])
         if not reset_steps:
             self.total_episodes = checkpoint["episodes"]
             self.total_env_steps = checkpoint["env_steps"]
@@ -327,12 +344,20 @@ class DroneRunner(Runner):
         if "target_speed" in episode_infos.keys():
             import plotly.express as px
             import pandas as pd
+            from sklearn import manifold
+
             df = pd.DataFrame({
                 "target_speed": np.array(episode_infos["target_speed"]).flatten(),
-                "success": np.array(episode_infos["success@predator"]).flatten()
+                "success": np.array(episode_infos["success@predator"]).flatten(),
+                "reward_capture": np.array(episode_infos["reward_capture@predator"]).flatten(),
                 })
-            fig = px.density_heatmap(df, x="target_speed", y="success", marginal_x="histogram", marginal_y="histogram")
-            wandb.log({"hist": fig})
+            feature, value = self.policies["predator"].critics[0].get_feature_and_value()
+            manifold.TSNE()
+            wandb.log({
+                "success vs. target_speed": px.density_heatmap(df, x="target_speed", y="success", marginal_y="histogram"),
+                "capture_reward vs. target_speed": px.density_heatmap(df, x="target_speed", y="success", marginal_y="histogram"),
+                "feature t-SNE plot": None
+            })
         if log:
             self.log(eval_infos)
         return eval_infos

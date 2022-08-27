@@ -42,6 +42,8 @@ params:
   clip_param: 0.2
   entropy_coef: 0.01
 
+  num_critics: 1
+
   # network
   activation_id: 1
   attn_N: 1

@@ -1,4 +1,6 @@
 from ast import Not
+from collections import defaultdict
+import functools
 from torchrl.data.tensordict.tensordict import TensorDict
 from .r_actor_critic import R_Actor, R_Critic
 import gym
@@ -33,19 +35,6 @@ def update_linear_schedule(optimizer, epoch, total_num_epochs, initial_lr):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
 
-# def huber_loss(e, d):
-#     a = (abs(e) <= d).float()
-#     b = (e > d).float()
-#     return a*e**2/2 + b*d*(abs(e)-d/2)
-
-def get_gard_norm(it):
-    sum_grad = 0
-    for x in it:
-        if x.grad is None:
-            continue
-        sum_grad += x.grad.norm() ** 2
-    return math.sqrt(sum_grad)
-
 class MAPPOPolicy:
     def __init__(self, 
             cfg: MAPPOPolicyConfig,
@@ -68,7 +57,6 @@ class MAPPOPolicy:
         self.huber_delta = cfg.huber_delta
 
         self._use_recurrent_policy = cfg.use_recurrent_policy
-        self._use_naive_recurrent = cfg.use_naive_recurrent_policy
         self._use_max_grad_norm = cfg.use_max_grad_norm
         self._use_clipped_value_loss = cfg.use_clipped_value_loss
         self._use_huber_loss = cfg.use_huber_loss
@@ -76,16 +64,17 @@ class MAPPOPolicy:
         self._use_valuenorm = cfg.use_valuenorm
         self._use_value_active_masks = cfg.use_value_active_masks
         self._use_policy_active_masks = cfg.use_policy_active_masks
-        self._use_policy_vhead = cfg.use_policy_vhead
 
+        self.num_critics = cfg.num_critics
         # policy models
         self.actor = R_Actor(cfg, obs_space, act_space, self.device)
-        self.critic = R_Critic(cfg, state_space, self.device)
-
         self.actor_optimizer = torch.optim.Adam(self.actor.parameters(), lr=cfg.actor_lr, weight_decay=cfg.weight_decay)
-        self.critic_optimizer = torch.optim.Adam(self.critic.parameters(), lr=cfg.critic_lr, weight_decay=cfg.weight_decay)
+        
+        self.critic_loss_fn = functools.partial(huber_loss, delta=self.huber_delta) if self._use_huber_loss else mse_loss
+        self.critics = [R_Critic(cfg, state_space, self.device) for _ in range(self.num_critics)]
+        self.critic_optimizers = [torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr, weight_decay=cfg.weight_decay) for critic in self.critics]
 
-        self.scaler = torch.cuda.amp.GradScaler()
+        # self.scaler = torch.cuda.amp.GradScaler()
 
         assert (self._use_popart and self._use_valuenorm) == False, ("self._use_popart and self._use_valuenorm can not be set True simultaneously")
         
@@ -95,16 +84,6 @@ class MAPPOPolicy:
                 self.policy_value_normalizer = self.policy.actor.v_out
         elif self._use_valuenorm:
             self.value_normalizer = ValueNorm(1, device = self.device)
-            if self._use_policy_vhead:
-                self.policy_value_normalizer = ValueNorm(1, device = self.device)
-        else:
-            self.value_normalizer = None
-            if self._use_policy_vhead:
-                self.policy_value_normalizer = None
-
-    def lr_decay(self, episode, episodes):
-        update_linear_schedule(self.actor_optimizer, episode, episodes, self.lr)
-        update_linear_schedule(self.critic_optimizer, episode, episodes, self.critic_lr)
 
     def get_action_and_value(self, 
             share_obs, obs, 
@@ -114,7 +93,7 @@ class MAPPOPolicy:
             available_actions=None, 
             deterministic=False) -> Dict[str, torch.Tensor]:
         actions, action_log_probs, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
-        values, rnn_states_critic = self.critic(share_obs, rnn_states_critic, masks)
+        values, rnn_states_critic = self.critics[0](share_obs, rnn_states_critic, masks)
         return {
             "value": values, 
             "action": actions, 
@@ -123,14 +102,9 @@ class MAPPOPolicy:
             "rnn_state_critic": rnn_states_critic
         }
 
-    def get_values(self, share_obs, rnn_states_critic, masks) -> torch.Tensor:
-        values, critic_states = self.critic(share_obs, rnn_states_critic, masks)
+    def get_value(self, share_obs, rnn_state_critic, mask) -> torch.Tensor:
+        values, critic_states = self.critics[0](share_obs, rnn_state_critic, mask)
         return values
-
-    def evaluate_actions(self, share_obs, obs, rnn_states_actor, rnn_states_critic, action, masks, available_actions=None, active_masks=None):
-        action_log_probs, dist_entropy, policy_values = self.actor.evaluate_actions(obs, rnn_states_actor, action, masks, available_actions, active_masks)
-        values, _ = self.critic(share_obs, rnn_states_critic, masks)
-        return values, action_log_probs, dist_entropy, policy_values
 
     def act(self, 
             obs, 
@@ -139,85 +113,74 @@ class MAPPOPolicy:
         actions, _, rnn_states_actor = self.actor(obs, rnn_states_actor, masks, available_actions, deterministic)
         return actions, rnn_states_actor
     
-    def cal_value_loss(self, value_normalizer, values, value_preds_batch, return_batch, active_masks_batch):
-        value_pred_clipped = value_preds_batch + (values - value_preds_batch).clamp(-self.clip_param, self.clip_param)
+    def update_actor(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
+        action_log_probs, dist_entropy = self.actor.evaluate_actions(
+            batch["obs"], 
+            batch["rnn_state_actor"], 
+            batch["action"], 
+            batch["mask"], 
+        )
+        ratio = torch.exp(action_log_probs - batch["old_action_log_prob"])
+
+        surr1 = ratio * batch["advantage"]
+        surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * batch["advantage"]
+
+        policy_loss = - torch.min(surr1, surr2).mean()
+        policy_loss = policy_loss - self.entropy_coef * dist_entropy
         
+        policy_loss.backward()
+        grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+        self.actor_optimizer.step()
+        self.actor_optimizer.zero_grad(set_to_none=True)
+        return {"policy_loss": policy_loss.item(), "ratio": ratio.detach().mean().item(), "actor_grad_norm": grad_norm.item()}
 
-        if self._use_huber_loss:
-            if self._use_popart or self._use_valuenorm:
-                value_normalizer.update(return_batch)
-                return_batch = value_normalizer.normalize(return_batch)
-            
-            value_loss_clipped = huber_loss(return_batch, value_pred_clipped, delta=self.huber_delta)
-            value_loss_original = huber_loss(return_batch, values, delta=self.huber_delta)
-        else:
-            if self._use_popart or self._use_valuenorm:
-                value_loss_clipped = mse_loss(value_normalizer.normalize(return_batch), value_pred_clipped)
-                value_loss_original = mse_loss(value_normalizer.normalize(return_batch), values)
-            else:
-                value_loss_clipped = mse_loss(return_batch, value_pred_clipped)
-                value_loss_original = mse_loss(return_batch, values)
+    def calc_value_loss(self, critic: R_Critic, batch: Dict[str, torch.Tensor]):
+        value = critic.get_value(batch["state"], batch["rnn_state_critic"], batch["mask"])
+        value_pred_clipped = batch["value_pred"] + (value - batch["value_pred"]).clamp(-self.clip_param, self.clip_param)
+        return_batch = batch["return"]
+        if self._use_popart or self._use_valuenorm:
+            self.value_normalizer.update(return_batch)
+            return_batch = self.value_normalizer.normalize(return_batch)
 
+        value_loss_clipped = self.critic_loss_fn(return_batch, value_pred_clipped)
+        value_loss_original = self.critic_loss_fn(return_batch, value)
+        
         if self._use_clipped_value_loss:
             value_loss = torch.max(value_loss_original, value_loss_clipped)
         else:
             value_loss = value_loss_original
+        return value, value_loss
 
-        if self._use_value_active_masks:
-            value_loss = (value_loss * active_masks_batch).sum() / active_masks_batch.sum()
-        else:
-            value_loss = value_loss.mean()
+    def update_critic(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:
+        values = []
+        result_dict = {}
+        for i, (critic, optimizer) in enumerate(zip(self.critics, self.critic_optimizers)):
+            value, value_loss = self.calc_value_loss(critic, batch)
+            values.append(value)
+            (value_loss * self.value_loss_coef).backward()
+            grad_norm = nn.utils.clip_grad_norm_(critic.parameters(), self.max_grad_norm)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            result_dict[f"value_loss_{i}"] = value_loss.item()
+            result_dict[f"critic_grad_norm_{i}"] = grad_norm.item()
 
-        return value_loss
+        if len(values) > 1:
+            result_dict["value_std"] = torch.concat(values, dim=-1).std(dim=-1).mean()
+        return result_dict
 
     def ppo_update(self, sample):
 
-        share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
+        state_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, \
         value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, \
-        adv_targ, available_actions_batch = sample
+        adv_targ, available_actions_batch = sample        
 
-        # Reshape to do in a single forward pass for all steps
-        # with torch.autocast(device_type=self.device, dtype=torch.float16):
-        values, action_log_probs, dist_entropy, policy_values = self.evaluate_actions(share_obs_batch,
-                                                                            obs_batch, 
-                                                                            rnn_states_batch, 
-                                                                            rnn_states_critic_batch, 
-                                                                            actions_batch, 
-                                                                            masks_batch, 
-                                                                            available_actions_batch,
-                                                                            active_masks_batch)
-        # actor update
-        ratio = torch.exp(action_log_probs - old_action_log_probs_batch)
+        result_dict = {}
+        actor_batch = {"obs": obs_batch, "rnn_state_actor": rnn_states_batch, "action": actions_batch, "mask": masks_batch, "old_action_log_prob": old_action_log_probs_batch, "advantage": adv_targ}
+        critic_batch = {"state": state_batch, "value_pred": value_preds_batch, "rnn_state_critic": rnn_states_critic_batch, "mask": masks_batch, "return": return_batch}
+        result_dict.update(self.update_actor(actor_batch))
+        result_dict.update(self.update_critic(critic_batch))
 
-        surr1 = ratio * adv_targ
-        surr2 = torch.clamp(ratio, 1.0 - self.clip_param, 1.0 + self.clip_param) * adv_targ
-
-        if self._use_policy_active_masks:
-            policy_loss = (-torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True) * active_masks_batch).sum() / active_masks_batch.sum()
-        else:
-            policy_loss = -torch.sum(torch.min(surr1, surr2), dim=-1, keepdim=True).mean()
-        
-        policy_loss = policy_loss - self.entropy_coef * dist_entropy
-        value_loss = self.cal_value_loss(self.value_normalizer, values, value_preds_batch, return_batch, active_masks_batch)
-        
-        # self.scaler.scale(policy_loss).backward()
-        policy_loss.backward()
-        # self.scaler.unscale_(self.actor_optimizer)
-        actor_grad_norm = nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-        # self.scaler.step(self.actor_optimizer)
-        self.actor_optimizer.step()
-        self.actor_optimizer.zero_grad(set_to_none=True)
-
-        # self.scaler.scale(value_loss * self.value_loss_coef).backward()
-        (value_loss * self.value_loss_coef).backward()
-        # self.scaler.unscale_(self.critic_optimizer)
-        critic_grad_norm = nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-        # self.scaler.step(self.critic_optimizer)
-        self.critic_optimizer.step()
-        self.critic_optimizer.zero_grad(set_to_none=True)
-        # self.scaler.update()
-
-        return value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, ratio
+        return result_dict
         
     def train(self, buffer, turn_on=True):
         if self._use_popart or self._use_valuenorm:
@@ -227,58 +190,42 @@ class MAPPOPolicy:
         advantages[buffer.active_masks[:-1] == 0.0].zero_()
         advantages = (advantages - advantages.mean())  / (advantages.std() + 1e-8)
 
-        train_info = {}
-
-        train_info['value_loss'] = 0
-        train_info['policy_loss'] = 0
-        train_info['dist_entropy'] = 0
-        train_info['actor_grad_norm'] = 0
-        train_info['critic_grad_norm'] = 0
-        train_info['ratio'] = 0
+        train_info = defaultdict(float)
 
         for _ in range(self.ppo_epoch):
             if self._use_recurrent_policy:
                 data_generator = buffer.recurrent_generator(advantages, self.num_mini_batch, self.data_chunk_length)
-            elif self._use_naive_recurrent:
-                data_generator = buffer.naive_recurrent_generator(advantages, self.num_mini_batch)
             else:
                 data_generator = buffer.feed_forward_generator(advantages, self.num_mini_batch)
 
             for i, sample in enumerate(data_generator):
-                value_loss, critic_grad_norm, policy_loss, dist_entropy, actor_grad_norm, ratio \
-                    = self.ppo_update(sample)
-
-                train_info['value_loss'] += value_loss.item()
-                train_info['policy_loss'] += policy_loss.item()
-                train_info['dist_entropy'] += dist_entropy.item()
-                
-                train_info['actor_grad_norm'] += actor_grad_norm.item()
-                train_info['critic_grad_norm'] += critic_grad_norm.item()
-
-                train_info['ratio'] += ratio.mean().item()
+                result_dict = self.ppo_update(sample)
+                for k, v in result_dict.items():
+                    train_info[k] += v
 
         num_updates = self.ppo_epoch * self.num_mini_batch
 
         for k in train_info.keys():
             train_info[k] /= num_updates
 
-        train_info["advantages"] = advantages.mean()
-
         return train_info
 
     def prep_training(self):
         self.actor.train()
-        self.critic.train()
+        [critic.train() for critic in self.critics]
 
     def prep_rollout(self):
         self.actor.eval()
-        self.critic.eval()
+        [critic.eval() for critic in self.critics]
     
-    def get_initial_rnn_states(self, *batch_size):
-        if self._use_recurrent_policy or self._use_naive_recurrent:
-            return (
-                torch.zeros(self.actor._recurrent_N, *batch_size,  self.actor.hidden_size, device=self.device),
-                torch.zeros(self.critic._recurrent_N, *batch_size, self.actor.hidden_size, device=self.device)
-            )
-        else:
-            return (None, None)
+    def state_dict(self):
+        return {
+            "actor": self.actor.state_dict(),
+            "critics": [critic.state_dict() for critic in self.critics]
+        }
+    
+    def load_state_dict(self, state_dict: Dict[str, Any]):
+        self.actor.load_state_dict(state_dict["actor"])
+        for critic, critic_state_dict in zip(self.critics, state_dict["critics"]):
+            critic.load_state_dict(critic_state_dict)
+            

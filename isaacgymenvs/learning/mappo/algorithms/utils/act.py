@@ -21,7 +21,7 @@ class ACTLayer(nn.Module):
         elif isinstance(action_space, spaces.Box):
             self.continuous_action = True
             action_dim = action_space.shape[0]
-            self.action_out = DiagGaussian(inputs_dim, action_dim, use_orthogonal, gain, tanh=kwargs["tanh_normal"], sde=kwargs["sde"])
+            self.action_out = DiagGaussian(inputs_dim, action_dim, use_orthogonal, gain)
         elif action_space.__class__.__name__ == "MultiBinary":
             action_dim = action_space.shape[0]
             self.action_out = Bernoulli(inputs_dim, action_dim, use_orthogonal, gain)

@@ -76,7 +76,7 @@ class SharedReplayBuffer(object):
         self.actions = torch.zeros(
             (self.num_steps, self.num_envs, num_agents, act_shape), device=device)
         self.action_log_probs = torch.zeros(
-            (self.num_steps, self.num_envs, num_agents, act_shape), device=device)
+            (self.num_steps, self.num_envs, num_agents, 1), device=device)
         self.rewards = torch.zeros(
             (self.num_steps, self.num_envs, num_agents, 1), device=device)
 
