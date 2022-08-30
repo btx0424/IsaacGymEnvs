@@ -38,23 +38,35 @@ class RunnerConfig:
 class PPOConfig:
     num_steps: int = 16
     num_mini_batch: int = 8
-
-class TensorDict(Dict[str, torch.Tensor]):
-    def reshape(self, *shape: int):
-        return TensorDict({key: value.reshape(*shape) for key, value in self.items()})
-
-    def flatten(self, start_dim: int = 0, end_dim: int = -1):
-        return TensorDict({key: value.flatten(start_dim, end_dim) for key, value in self.items()})
     
-    def unflatten(self, dim, sizes):
-        return TensorDict({key: value.unflatten(dim, sizes) for key, value in self.items()})
+from isaacgymenvs.learning.mappo.utils.data import TensorDict
+class LazyRolloutBuffer(TensorDict):
+    def __init__(self, size=64, stack_dim=0):
+        super().__init__()
+        self.size = size
+        self.stack_dim = stack_dim
+        self._step = 0
 
-    def set(self, key, value):
-        self[key] = value
+    def insert(self, dict: Dict[str, torch.Tensor], create_next=False, step=True):
+        for k, v in dict.items():
+            if k not in self.keys():
+                if create_next:
+                    size = (*v.shape[:self.stack_dim], self.size+1, *v.shape[self.stack_dim:])
+                    tensor = self[f"_{k}"] = torch.zeros(size, dtype=v.dtype, device=v.device)
+                    self[k], self[f"next_{k}"] = tensor[:-1], tensor[1:]
+                else:
+                    size = (*v.shape[:self.stack_dim], self.size, *v.shape[self.stack_dim:])
+                    self[k] = torch.zeros(size, dtype=v.dtype, device=v.device)
+            self[k][self._step] = v
+        if step:
+            self._step = (self._step + 1) % self.size
+        
+    def update(self, dict):
+        raise NotImplementedError
 
 def group_by_agent(tensordict: Dict[str, Any]):
-    grouped = defaultdict(dict)
-    others = {}
+    grouped = defaultdict(TensorDict)
+    others = TensorDict()
     for k, v in tensordict.items():
         k = k.split("@")
         if len(k) > 1:
@@ -149,6 +161,8 @@ class DroneRunner(Runner):
                 buffer.share_obs[0] = tensordict[f"obs@{agent_type}"]
         
         init_buffer(tensordict)
+        
+        lazybuffer = LazyRolloutBuffer(size=self.num_steps)
 
         def joint_policy(tensordict: TensorDict):
             for agent_type, policy in self.policies.items():
@@ -156,23 +170,28 @@ class DroneRunner(Runner):
                     share_obs=tensordict[f"obs@{agent_type}"].flatten(0, 1),
                     obs=tensordict[f"obs@{agent_type}"].flatten(0, 1),
                 )
-                tensordict[f"actions@{agent_type}"] = result_dict["action"].reshape(self.num_envs, self.num_agents[agent_type], -1)
-                tensordict[f"value@{agent_type}"] = result_dict["value"].reshape(self.num_envs, self.num_agents[agent_type], -1)
-                tensordict[f"action_log_prob@{agent_type}"] = result_dict["action_log_prob"].reshape(self.num_envs, self.num_agents[agent_type], -1)
+                tensordict.update({
+                    f"{k}@{agent_type}":v.reshape(self.num_envs, self.num_agents[agent_type], -1) 
+                    for k, v in result_dict.items() if v is not None})
+            # grouped, others = group_by_agent(tensordict)
+            # for agent_type, agent_input in grouped.items():
+            #     policy = self.policies[agent_type]
+            #     agent_output = policy(agent_input)
+            #     tensordict.update({f"{k}@{agent_type}":v for k, v in agent_output.items()})
             return tensordict
         
-
-        def step_callback(env, tensordict, step):
+        def step_callback(env, tensordict: TensorDict, step):
+            
             for agent_type, buffer in self.buffers.items():
                 buffer.insert(**TensorDict(dict(
                     share_obs=tensordict[f"next_obs@{agent_type}"],
                     obs=tensordict[f"next_obs@{agent_type}"],
                     actions=tensordict[f"actions@{agent_type}"],
-                    action_log_probs=tensordict[f"action_log_prob@{agent_type}"],
-                    rewards=tensordict[f"reward@{agent_type}"].sum(-1),
-                    masks=1.0 - tensordict[f"done@{agent_type}"],
-                    value_preds=tensordict[f"value@{agent_type}"],
-                )).reshape(self.num_envs, self.num_agents[agent_type], -1))
+                    action_log_probs=tensordict[f"action_log_probs@{agent_type}"],
+                    rewards=tensordict[f"rewards@{agent_type}"].sum(-1, keepdim=True),
+                    masks=1.0 - tensordict[f"dones@{agent_type}"],
+                    value_preds=tensordict[f"values@{agent_type}"],
+                )))
 
             env_done = tensordict["env_done"].squeeze(-1)
             if env_done.any():
@@ -180,6 +199,8 @@ class DroneRunner(Runner):
                     episode_infos[k].extend(v.tolist())
                 self.total_episodes += env_done.sum().item()
         
+            # lazybuffer.insert(tensordict.drop("rpms", "env_done"))
+            
         step_kwargs = {}
         if self.use_cl:
             class TensorListBuffer:
@@ -221,6 +242,15 @@ class DroneRunner(Runner):
                     callback=step_callback)
             rollout_end = time.perf_counter()
             train_infos = self.train()
+            # train_infos = {}
+            # grouped, others= group_by_agent(lazybuffer)
+            # for agent_type, policy in self.policies.items():
+            #     agent_batch = grouped[agent_type]
+            #     # reward shaping TODO: do it somewhere else
+            #     agent_batch["rewards"] = agent_batch["rewards"].sum(-1, keepdim=True)
+            #     agent_train_info = policy.train_on_batch(TensorDict(**agent_batch, **others))
+            #     train_infos.update({f"{agent_type}/{k}": v for k, v in agent_train_info.items()})
+
             iter_end = time.perf_counter()
 
             self.env_steps_this_run += self.num_steps * self.num_envs
@@ -356,7 +386,7 @@ class DroneRunner(Runner):
             wandb.log({
                 "success vs. target_speed": px.density_heatmap(df, x="target_speed", y="success", marginal_y="histogram"),
                 "capture_reward vs. target_speed": px.density_heatmap(df, x="target_speed", y="success", marginal_y="histogram"),
-                "feature t-SNE plot": None
+                # "feature t-SNE plot": None
             })
         if log:
             self.log(eval_infos)

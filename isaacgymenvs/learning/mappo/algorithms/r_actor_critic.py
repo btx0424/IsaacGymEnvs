@@ -129,12 +129,11 @@ class R_Critic(nn.Module):
 
         return values, rnn_states
 
-    def get_feature_and_value(self, state, rnn_state=None, mask=None) -> torch.Tensor:
+    def get_feature(self, state, rnn_state=None, mask=None) -> torch.Tensor:
         critic_features = self.base(state)
         if self._use_naive_recurrent_policy or self._use_recurrent_policy:
             critic_features, rnn_states = self.rnn(critic_features, rnn_states, mask)
-        values = self.v_out(critic_features)
-        return critic_features, values
+        return critic_features
     
     def get_value(self, state, rnn_state=None, mask=None) -> torch.Tensor:
         critic_features = self.base(state)

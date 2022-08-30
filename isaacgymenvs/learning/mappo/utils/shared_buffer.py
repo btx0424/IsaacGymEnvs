@@ -76,7 +76,7 @@ class SharedReplayBuffer(object):
         self.actions = torch.zeros(
             (self.num_steps, self.num_envs, num_agents, act_shape), device=device)
         self.action_log_probs = torch.zeros(
-            (self.num_steps, self.num_envs, num_agents, 1), device=device)
+            (self.num_steps, self.num_envs, num_agents, act_shape), device=device)
         self.rewards = torch.zeros(
             (self.num_steps, self.num_envs, num_agents, 1), device=device)
 
@@ -268,51 +268,6 @@ class SharedReplayBuffer(object):
 
             yield share_obs_batch, obs_batch, None, None, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, available_actions_batch
 
-    def naive_recurrent_generator(self, advantages, num_mini_batch):
-        num_steps, num_envs, num_agents = self.rewards.shape[0:3]
-        batch_size = num_envs*num_agents
-        assert num_envs*num_agents >= num_mini_batch, (
-            "PPO requires the number of processes ({})* number of agents ({}) "
-            "to be greater than or equal to the number of "
-            "PPO mini batches ({}).".format(num_envs, num_agents, num_mini_batch))
-        num_envs_per_batch = batch_size // num_mini_batch
-        perm = torch.randperm(batch_size).numpy()
-
-        share_obs = self.share_obs.reshape(-1, batch_size, *self.share_obs.shape[3:])
-        obs = self.obs.reshape(-1, batch_size, *self.obs.shape[3:])
-
-        actions = self.actions.reshape(-1, batch_size, self.actions.shape[-1])
-        if self.available_actions is not None:
-            available_actions = self.available_actions.reshape(
-                -1, batch_size, self.available_actions.shape[-1])
-        value_preds = self.value_preds.reshape(-1, batch_size, 1)
-        returns = self.returns.reshape(-1, batch_size, 1)
-        masks = self.masks.reshape(-1, batch_size, 1)
-        active_masks = self.active_masks.reshape(-1, batch_size, 1)
-        action_log_probs = self.action_log_probs.reshape(
-            -1, batch_size, self.action_log_probs.shape[-1])
-        advantages = advantages.reshape(-1, batch_size, 1)
-
-        for start_ind in range(0, batch_size, num_envs_per_batch):
-
-            ind = perm[start_ind: start_ind + num_envs_per_batch]
-            share_obs_batch = share_obs[:-1, ind]
-            obs_batch = obs[:-1, ind]
-            rnn_states_batch = self.rnn_states[0, :, ind]
-            rnn_states_critic_batch = self.rnn_states_critic[0, :, ind]
-            actions_batch = actions[:, ind]
-            
-            value_preds_batch = value_preds[:-1, ind]
-            return_batch = returns[:-1, ind]
-            masks_batch = masks[:-1, ind]
-            active_masks_batch = active_masks[:-1, ind]
-            old_action_log_probs_batch = action_log_probs[:, ind]
-            adv_targ = advantages[:, ind]
-
-            # Flatten the (T, N, ...) from_numpys to (T * N, ...)
-
-            assert rnn_states_batch.dim()==3
-            yield share_obs_batch, obs_batch, rnn_states_batch, rnn_states_critic_batch, actions_batch, value_preds_batch, return_batch, masks_batch, active_masks_batch, old_action_log_probs_batch, adv_targ, None
 
     def recurrent_generator(self, advantages: torch.Tensor, num_mini_batches, chunk_length):
         T,  num_envs, num_agents = self.rewards.shape[0:3]

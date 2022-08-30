@@ -34,6 +34,10 @@ sim_device: 'cuda:${cuda_id}'
 rl_device: 'cuda:${cuda_id}'
 graphics_device_id: ${cuda_id}
 
+# cl TODO: structure config files
+progress_speed: # [2.0, 0.2, 8.0]
+progress_threshold: 
+
 params:
   # ppo
   num_steps: 64
@@ -54,6 +58,7 @@ params:
   actor_lr: 0.0005
   critic_lr: 0.0005
   recurrent_N: 1
+
 
   sde: False
   algorithm_name: mappo

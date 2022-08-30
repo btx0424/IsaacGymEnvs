@@ -13,8 +13,8 @@ import setproctitle
 from isaacgymenvs.tasks import isaacgym_task_map
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from omegaconf import OmegaConf
-from isaacgymenvs.learning.mappo.runner.shared.drone_runner_coop import DroneRunner
-# from isaacgymenvs.learning.mappo.runner.shared.drone_runner import DroneRunner
+# from isaacgymenvs.learning.mappo.runner.shared.drone_runner_coop import DroneRunner
+from isaacgymenvs.learning.mappo.runner.shared.drone_runner import DroneRunner
 
 def create_envs(cfg) -> MultiAgentVecTask:
     task_config = cfg.task
