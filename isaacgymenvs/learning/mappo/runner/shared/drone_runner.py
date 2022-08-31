@@ -307,7 +307,7 @@ class DroneRunner(Runner):
             value_output = self.policies["predator"].value_op(task_buffer.rename(init_obs="obs"), disagreement=True).mean(1) # average over agents
             critic_features = self.policies["predator"].critics[0].get_feature(task_buffer["init_obs"][:, 0]) # first critic, first agent ...
 
-            df = pd.DataFrame(task_buffer.select("success", "target_speeds").update(value_output).flatten().cpu().numpy())
+            df = pd.DataFrame(task_buffer.select("success", "target_speeds", "collision").update(value_output).flatten().cpu().numpy())
             tsne = manifold.TSNE()
             embeddings = tsne.fit_transform(critic_features.cpu().numpy()) # [N, 2]
             x, y = embeddings.T
@@ -315,7 +315,7 @@ class DroneRunner(Runner):
                 "success": px.scatter(x=x, y=y, color=df["success"]),
                 "target_speeds": px.scatter(x=x, y=y, color=df["target_speeds"]),
                 "value_stds": px.scatter(x=x, y=y, color=df["value_stds"]),
-                "success vs. target_speeds": px.scatter(df, x="target_speeds", y="success", size="value_stds", marginal_y="histogram", color="values")
+                "success vs. target_speeds": px.scatter(df, x="target_speeds", y="collision", z="success", size="value_stds", marginal_y="histogram", color="values"),
             })
 
         task_buffer.clear()

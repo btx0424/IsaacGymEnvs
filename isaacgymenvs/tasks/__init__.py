@@ -71,4 +71,4 @@ isaacgym_task_map = {
     "Trifinger": Trifinger,
 }
 
-isaacgym_task_map.update({f"Quadrotor{k}": v for k, v in TASKS})
+isaacgym_task_map.update({f"Quadrotor{k}": v for k, v in TASKS.items()})

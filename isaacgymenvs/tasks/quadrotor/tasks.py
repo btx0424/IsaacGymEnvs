@@ -1,3 +1,4 @@
+from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 import torch
 import math
 import numpy as np
@@ -21,7 +22,7 @@ def uniform(size, low: float, high: float, device: torch.device) -> torch.Tensor
 def mix(x: torch.Tensor, y: torch.Tensor, a: torch.Tensor) -> torch.Tensor:
     return x * a + y * (1 - a)
 
-__all__ = ["TargetHard", "TargetFixed", "PredatorPrey"]
+# __all__ = ["TargetHard", "TargetFixed", "PredatorPrey"]
 
 class TargetHard(QuadrotorBase):
     agent_types = ["predator"]
@@ -34,7 +35,7 @@ class TargetHard(QuadrotorBase):
         self.capture_radius: float = cfg.get("captureRadius", 0.3)
         self.success_threshold: int = cfg.get("successThreshold", 50)
         self.target_speed = cfg.get("targetSpeed")
-        self.target_speeds = torch.ones(self.num_envs, device=self.device) # all targets have the same speed
+        self.target_speeds = torch.ones((self.num_envs, self.num_targets, 1), device=self.device) # all targets have the same speed
         self.boundary_radius  = cfg.get("boundaryRadius", 2.5)
         assert self.boundary_radius > 1
         self.task_spec = cfg.get("taskSpec", ["target_speed"])
@@ -64,11 +65,13 @@ class TargetHard(QuadrotorBase):
         self.action_spec = NdBoundedTensorSpec(-1, 1, (3,), device=self.device)
 
         self.drone_slice = slice(self.env_actor_index["drone"][0], self.env_actor_index["drone"][-1]+1)
-        self.extras["task"] = TensorDict({
+        self.target_slice = slice(self.env_actor_index["target"][0], self.env_actor_index["target"][-1]+1)
+        self.tasks = self.extras["task"] = TensorDict({
             "start_positions": torch.empty_like(self.quadrotor_pos),
             "init_obs": torch.empty((self.num_envs, self.num_agents, *self.obs_space.shape), device=self.device),
             "target_speeds": torch.empty_like(self.target_speeds),
-            "success": torch.empty(self.num_envs, device=self.device)
+            "success": torch.empty(self.num_envs, device=self.device),
+            "collision": torch.empty(self.num_envs, self.num_agents, device=self.device)
         })
 
     def allocate_buffers(self):
@@ -91,12 +94,14 @@ class TargetHard(QuadrotorBase):
             sample_idx = randperm[torch.arange(num_samples).reshape(done_envs, self.num_agents)%len(self.grid_avail)]
             start_positions = self.grid_centers[sample_idx]
         if target_speeds is None:
-            target_speeds = self.target_speed_dist.sample((done_envs,))
+            target_speeds = self.target_speed_dist.sample((done_envs, self.num_targets, 1))
         self.root_positions[envs_done, self.drone_slice] = start_positions
+        self.root_positions[envs_done, self.target_slice, 2] = self.MAX_XYZ[2] / 2
+        self.root_linvels[envs_done, self.target_slice] = 0
         self.target_speeds[envs_done] = target_speeds
 
-        self.extras["task"]["start_positions"][envs_done] = start_positions
-        self.extras["task"]["target_speeds"][envs_done] = target_speeds
+        self.tasks["start_positions"][envs_done] = start_positions
+        self.tasks["target_speeds"][envs_done] = target_speeds
         
     def compute_reward_and_done(self):
         pos = self.quadrotor_pos
@@ -137,8 +142,9 @@ class TargetHard(QuadrotorBase):
             "target_speeds": self.target_speeds.clone(),
             "length": self.progress_buf + 1,
         })
-        self.extras["task"]["success"][self.envs_done] = success[self.envs_done]
-        
+        self.tasks["success"][self.envs_done] = success[self.envs_done]
+        self.tasks["collision"][self.envs_done] = torch.abs(cum_reward[self.envs_done, ..., 2])
+
         return TensorDict({
             "rewards@predator": self.rew_buf.clone(), 
             "next_dones@predator": self.reset_buf.clone().unsqueeze(-1),
@@ -167,7 +173,7 @@ class TargetHard(QuadrotorBase):
         obs_tensor.append(states_self)
         obs_tensor = torch.cat(obs_tensor, dim=-1)
 
-        self.extras["task"]["init_obs"][self.envs_done] = obs_tensor[self.envs_done]
+        self.tasks["init_obs"][self.envs_done] = obs_tensor[self.envs_done]
 
         return TensorDict({
             "next_obs@predator": obs_tensor,
@@ -186,19 +192,19 @@ class TargetHard(QuadrotorBase):
     
     @property
     def target_pos(self) -> torch.Tensor:
-        return self.root_positions[:, self.env_actor_index["target"]]
+        return self.root_positions[:, self.target_slice]
 
     @target_pos.setter
     def target_pos(self, pos: torch.Tensor):
-        self.root_positions[:, self.env_actor_index["target"]] = pos
+        self.root_positions[:, self.target_slice] = pos
 
     @property
     def target_vel(self) -> torch.Tensor:
-        return self.root_linvels[:, self.env_actor_index["target"]]
+        return self.root_linvels[:, self.target_slice]
 
     @target_vel.setter
     def target_vel(self, vel: torch.Tensor):
-        self.root_linvels[:, self.env_actor_index["target"]] = vel
+        self.root_linvels[:, self.target_slice] = vel
 
     def pre_physics_step(self, tensordict):
         super().pre_physics_step(tensordict)
@@ -215,9 +221,9 @@ class TargetHard(QuadrotorBase):
         d = target_pos.view(self.num_envs, self.num_targets, 1, 3) - force_sources
         distance = torch.norm(d, dim=-1, keepdim=True)
         forces = d / (1e-7 + distance**2)
-        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds.view(-1, 1, 1)
+        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds
         
-        target_pos[..., 2].clamp_(0.2, self.MAX_XYZ[2]-0.2)
+        target_pos[..., 2].clamp_(0., self.MAX_XYZ[2]-0.2)
         self.target_pos = target_pos # necessary?
         self.target_vel = target_vel
 
@@ -232,7 +238,8 @@ class TargetHard(QuadrotorBase):
             target_pos = self.target_pos[0].expand_as(quadrotor_pos)
             points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
             self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
-            self.viewer_lines.append((torch.cat([target_pos, target_pos+target_vel[0]]).cpu().numpy(), [[0, 1, 0]]))
+            points_ = torch.cat([self.target_pos[0], self.target_vel[0]], -1).squeeze().cpu().numpy()
+            self.viewer_lines.append((points_, [[0, 1, 0]]))
 
     def get_dummy_policy(self, *args, **kwargs) -> Callable:
         def dummy_policy(tensordict: TensorDict):
@@ -245,13 +252,16 @@ class TargetHard(QuadrotorBase):
 
 class TargetFixed(TargetHard):
     def pre_physics_step(self, tensordict):
-        super().pre_physics_step(tensordict)
+        super(TargetHard, self).pre_physics_step(tensordict)
         cur_pos = self.target_pos
         next_pos = cur_pos.clone()
-        next_pos[..., 0] = torch.cos(self.progress_buf)
-        next_pos[..., 1] = torch.sin(2*self.progress_buf) / 2
+        next_pos[..., 0] = torch.cos(self.progress_buf/self.max_episode_length * torch.pi * 6).unsqueeze(-1)
+        next_pos[..., 1] = torch.sin(2*self.progress_buf/self.max_episode_length * torch.pi * 6).unsqueeze(-1) / 2
+        next_pos[..., :2] *= 1.2
+        theta = math.pi/2
+        # next_pos[..., :2] = next_pos[..., :2] @ torch.tensor([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]], device=self.device) 
         vel = (next_pos - cur_pos) / self.dt
-        self.taget_vel = vel
+        self.root_linvels[:, self.target_slice] = vel
 
         # apply
         actor_reset_ids = self.sim_actor_index["target"].flatten()
@@ -260,7 +270,7 @@ class TargetFixed(TargetHard):
 
 class TargetHarder(TargetHard):
     def pre_physics_step(self, tensordict):
-        super().pre_physics_step(tensordict)
+        super(TargetHard, self).pre_physics_step(tensordict)
         # update targets
         target_pos = self.target_pos # (num_envs, num_targets, 3)
         # imaginary predator at the boundary
@@ -270,16 +280,22 @@ class TargetHarder(TargetHard):
             .view(self.num_envs, 1, self.num_agents, 3) \
             .expand(self.num_envs, self.num_targets, self.num_agents, 3)
         quadrotor_pos_projected = quadrotor_pos.clone()
-        quadrotor_pos_projected[..., 2] = target_pos[..., 2]
+        quadrotor_pos_projected[..., 2] = target_pos[..., 2].unsqueeze(-1)
 
         force_sources = torch.cat([quadrotor_pos, boundary_pos, quadrotor_pos_projected], dim=-2) # (num_envs, num_targets, num_agents+1, 3)
         d = target_pos.view(self.num_envs, self.num_targets, 1, 3) - force_sources
         distance = torch.norm(d, dim=-1, keepdim=True)
         forces = d / (1e-7 + distance**2)
-        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds.view(-1, 1, 1)
-        
-        target_pos[..., 2].clamp_(0.2, self.MAX_XYZ[2]-0.2)
-        self.target_pos = target_pos # necessary?
+
+        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds
+
+        # target_dvel = normalize(torch.mean(forces, dim=-2))
+        # target_vel = self.target_vel + self.dt * target_dvel
+        # target_speed = torch.norm(target_vel, dim=-1, keepdim=True) # (num_envs, num_targets, 1)
+        # target_vel = target_vel / (1e-7+target_speed) * torch.min(target_speed, self.target_speeds)
+
+        target_pos[..., 2].clamp_(0., self.MAX_XYZ[2]-0.2)
+        self.target_pos = target_pos
         self.target_vel = target_vel
 
         # apply
@@ -293,7 +309,8 @@ class TargetHarder(TargetHard):
             target_pos = self.target_pos[0].expand_as(quadrotor_pos)
             points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
             self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
-            self.viewer_lines.append((torch.cat([target_pos, target_pos+target_vel[0]]).cpu().numpy(), [[0, 1, 0]]))
+            points_ = torch.cat([self.target_pos[0], self.target_vel[0]], -1).squeeze().cpu().numpy()
+            self.viewer_lines.append((points_, [[0, 1, 0]]))
 
 class PredatorPrey(QuadrotorBase):
 

@@ -13,7 +13,7 @@ import setproctitle
 from isaacgymenvs.tasks import isaacgym_task_map
 from isaacgymenvs.tasks.base.vec_task import MultiAgentVecTask
 from omegaconf import OmegaConf
-from isaacgymenvs.learning.mappo.runner.shared.drone_runner_coop import DroneRunner
+from isaacgymenvs.learning.mappo.runner.shared.drone_runner import DroneRunner
 
 def create_envs(cfg) -> MultiAgentVecTask:
     task_config = cfg.task
@@ -60,7 +60,7 @@ def main(cfg):
             resume="allow",
             job_type="eval"
         )
-        wandb.restore("checkpoint.pt", run_path=cfg.run_path)
+        wandb.restore("checkpoint_best.pt", run_path=cfg.run_path)
     else:
         raise ValueError("Must provide a resume_id or run_path to eval!")
     
@@ -83,7 +83,7 @@ def main(cfg):
         "envs": envs,
     }
     runner = DroneRunner(config)
-    runner.restore()
+    runner.restore(tag="best")
     runner.eval(cfg.eval_episodes, log=False, verbose=True)
         
 if __name__ == "__main__":
