@@ -48,3 +48,4 @@ targetSpeed: 1
 boundaryRadius: 2.5
 taskSpec: ["target_speed", "spawn_pos"]
 rewardMix: 1
+successThreshold: 120

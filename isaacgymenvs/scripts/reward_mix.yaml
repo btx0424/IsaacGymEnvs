@@ -14,13 +14,21 @@ parameters:
       - [0, 4]
   
   task.rewardMix:
-    values: [1, 0.6, 0.3, 0]
+    values: [1, 0.3]
 
   use_cl:
     values: [True, False]
 
-  seed:
-    values: [123, 456]
+  params.num_critics:
+    values: 
+      - 3
+  
+  cuda_id:
+    values:
+      - 7
+      
+  # seed:
+  #   values: [123, 456]
 
   # params.num_mini_batch:
   #   values: [16, 32]

@@ -71,7 +71,7 @@ class DroneRunner(Runner):
         # CL config
         self.use_cl = cfg.use_cl
         self.progress_speed = cfg.progress_speed
-        self.progress_threshold=0.8
+        self.progress_threshold = 2.0
 
         self.num_envs = cfg.num_envs
 
@@ -146,9 +146,9 @@ class DroneRunner(Runner):
                 # add new tasks
                 if len(env_ids) > 0:
                     tasks: TensorDict = envs.extras["task"][env_ids]
-                    tasks_valid: torch.BoolTensor = (tasks["success"]>=0.) & (tasks["success"]<0.7)
+                    tasks_valid: torch.BoolTensor = (tasks["success"]>=0.3) & (tasks["success"]<0.7)
                     if tasks_valid.any():
-                        task_buffer.insert(tasks[tasks_valid], step=len(env_ids))
+                        task_buffer.insert(tasks[tasks_valid], step=tasks_valid.sum())
                     for k, v in envs.extras["episode"][env_ids].items():
                         episode_infos[k].extend(v.tolist())
                         self.total_episodes += len(env_ids)
@@ -200,7 +200,8 @@ class DroneRunner(Runner):
                 eval_info = self.eval(self.eval_episodes, log=True, verbose=False)
                 if self.progress_speed is not None and eval_info["eval/success@predator"] > self.progress_threshold:
                     start, step, end = self.progress_speed
-                    self.envs.target_speed_dist = torch.distributions.Uniform(self.envs.targe_speed_dist.low, min(self.envs.target_speed_dist.high+step, end))
+                    self.envs.target_speed_dist = torch.distributions.Uniform(self.envs.target_speed_dist.low, min(self.envs.target_speed_dist.high+step, end))
+                    logging.info(f"Increase target_speeds to be in range [{self.envs.target_speed_dist.low}, {self.envs.target_speed_dist.high}]")
                 tensordict = self.envs.reset()
 
             if (
@@ -313,10 +314,9 @@ class DroneRunner(Runner):
             eval_infos.update({
                 "success": px.scatter(x=x, y=y, color=df["success"]),
                 "target_speeds": px.scatter(x=x, y=y, color=df["target_speeds"]),
+                "value_stds": px.scatter(x=x, y=y, color=df["value_stds"]),
+                "success vs. target_speeds": px.scatter(df, x="target_speeds", y="success", size="value_stds", marginal_y="histogram", color="values")
             })
-            if self.all_args.num_critics>1:
-                eval_infos["value_stds"] = px.scatter(x=x, y=y, color=df["value_stds"])
-                eval_infos["success vs. target_speeds"] = px.scatter(df, x="target_speeds", y="success", size="value_stds"),
 
         task_buffer.clear()
         if log:
