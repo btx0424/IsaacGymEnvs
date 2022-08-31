@@ -315,7 +315,7 @@ class DroneRunner(Runner):
                 "success": px.scatter(x=x, y=y, color=df["success"]),
                 "target_speeds": px.scatter(x=x, y=y, color=df["target_speeds"]),
                 "value_stds": px.scatter(x=x, y=y, color=df["value_stds"]),
-                "success vs. target_speeds": px.scatter(df, x="target_speeds", y="collision", z="success", size="value_stds", marginal_y="histogram", color="values"),
+                "success vs. target_speeds": px.scatter(df, x="target_speeds", y="success", size="value_stds", marginal_y="histogram", color="collision"),
             })
 
         task_buffer.clear()

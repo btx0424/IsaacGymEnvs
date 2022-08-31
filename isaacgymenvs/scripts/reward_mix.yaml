@@ -1,11 +1,11 @@
 project: isaacgymenvs
-name: test_cl
+name: target_harder
 program: train_mappo.py
 
 method: grid
 
 metric:
-  name: train/reward_capture@predator
+  name: eval/success@predator
   goal: maximize
 
 parameters:
@@ -14,8 +14,12 @@ parameters:
       - [0, 4]
   
   task.rewardMix:
-    values: [1, 0.3]
+    values: [1, 0.6, 0.3]
 
+  task.name:
+    values:
+      - "QuadrotorTargetHarder"
+  
   use_cl:
     values: [True, False]
 
@@ -45,9 +49,9 @@ parameters:
   #   values:
   #     - True
 
-  wandb_name:
-    values:
-      - test_cl
+  # wandb_name:
+  #   values:
+  #     - test_cl
 
 command:
   - ${env}

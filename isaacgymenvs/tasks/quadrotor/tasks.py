@@ -69,9 +69,9 @@ class TargetHard(QuadrotorBase):
         self.tasks = self.extras["task"] = TensorDict({
             "start_positions": torch.empty_like(self.quadrotor_pos),
             "init_obs": torch.empty((self.num_envs, self.num_agents, *self.obs_space.shape), device=self.device),
-            "target_speeds": torch.empty_like(self.target_speeds),
+            "target_speeds": torch.empty(self.num_envs, device=self.device),
             "success": torch.empty(self.num_envs, device=self.device),
-            "collision": torch.empty(self.num_envs, self.num_agents, device=self.device)
+            "collision": torch.empty(self.num_envs, device=self.device)
         })
 
     def allocate_buffers(self):
@@ -98,10 +98,10 @@ class TargetHard(QuadrotorBase):
         self.root_positions[envs_done, self.drone_slice] = start_positions
         self.root_positions[envs_done, self.target_slice, 2] = self.MAX_XYZ[2] / 2
         self.root_linvels[envs_done, self.target_slice] = 0
-        self.target_speeds[envs_done] = target_speeds
+        self.target_speeds[envs_done] = target_speeds.view(-1, 1, 1)
 
         self.tasks["start_positions"][envs_done] = start_positions
-        self.tasks["target_speeds"][envs_done] = target_speeds
+        self.tasks["target_speeds"][envs_done] = target_speeds.mean(1).squeeze()
         
     def compute_reward_and_done(self):
         pos = self.quadrotor_pos
@@ -143,7 +143,7 @@ class TargetHard(QuadrotorBase):
             "length": self.progress_buf + 1,
         })
         self.tasks["success"][self.envs_done] = success[self.envs_done]
-        self.tasks["collision"][self.envs_done] = torch.abs(cum_reward[self.envs_done, ..., 2])
+        self.tasks["collision"][self.envs_done] = torch.abs(cum_reward[self.envs_done, ..., 2]).sum(1)
 
         return TensorDict({
             "rewards@predator": self.rew_buf.clone(), 
@@ -255,10 +255,11 @@ class TargetFixed(TargetHard):
         super(TargetHard, self).pre_physics_step(tensordict)
         cur_pos = self.target_pos
         next_pos = cur_pos.clone()
-        next_pos[..., 0] = torch.cos(self.progress_buf/self.max_episode_length * torch.pi * 6).unsqueeze(-1)
-        next_pos[..., 1] = torch.sin(2*self.progress_buf/self.max_episode_length * torch.pi * 6).unsqueeze(-1) / 2
+        t = (self.progress_buf/self.max_episode_length * torch.pi).view(-1, 1, 1) * self.target_speeds
+        next_pos[..., 0] = torch.cos(t).squeeze(-1)
+        next_pos[..., 1] = torch.sin(2*t).squeeze(-1) / 2
         next_pos[..., :2] *= 1.2
-        theta = math.pi/2
+        # theta = math.pi/2
         # next_pos[..., :2] = next_pos[..., :2] @ torch.tensor([[math.cos(theta), -math.sin(theta)], [math.sin(theta), math.cos(theta)]], device=self.device) 
         vel = (next_pos - cur_pos) / self.dt
         self.root_linvels[:, self.target_slice] = vel

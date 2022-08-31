@@ -62,7 +62,10 @@ class TensorDict(Dict[str, torch.Tensor]):
     def mean(self, dim:int=None):
         return TensorDict({key: value.mean(dim) for key, value in self.items()})
 
-
+    @property
+    def shape(self):
+        return {k: v.shape for k, v in self.items()}
+    
 class LazyRolloutBuffer(TensorDict):
     def __init__(self, size=64, stack_dim=0):
         super().__init__()
