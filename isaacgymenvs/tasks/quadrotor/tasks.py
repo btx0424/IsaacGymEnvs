@@ -232,6 +232,7 @@ class TargetHard(QuadrotorBase):
             target_pos = self.target_pos[0].expand_as(quadrotor_pos)
             points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
             self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
+            self.viewer_lines.append((torch.cat([target_pos, target_pos+target_vel[0]]).cpu().numpy(), [[0, 1, 0]]))
 
     def get_dummy_policy(self, *args, **kwargs) -> Callable:
         def dummy_policy(tensordict: TensorDict):
@@ -256,6 +257,43 @@ class TargetFixed(TargetHard):
         actor_reset_ids = self.sim_actor_index["target"].flatten()
         self.gym.set_actor_root_state_tensor_indexed(
             self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
+
+class TargetHarder(TargetHard):
+    def pre_physics_step(self, tensordict):
+        super().pre_physics_step(tensordict)
+        # update targets
+        target_pos = self.target_pos # (num_envs, num_targets, 3)
+        # imaginary predator at the boundary
+        boundary_pos = target_pos.clone().view(self.num_envs, self.num_targets, 1, 3)
+        boundary_pos[..., :2] = normalize(boundary_pos[..., :2]) * self.boundary_radius
+        quadrotor_pos = self.quadrotor_pos \
+            .view(self.num_envs, 1, self.num_agents, 3) \
+            .expand(self.num_envs, self.num_targets, self.num_agents, 3)
+        quadrotor_pos_projected = quadrotor_pos.clone()
+        quadrotor_pos_projected[..., 2] = target_pos[..., 2]
+
+        force_sources = torch.cat([quadrotor_pos, boundary_pos, quadrotor_pos_projected], dim=-2) # (num_envs, num_targets, num_agents+1, 3)
+        d = target_pos.view(self.num_envs, self.num_targets, 1, 3) - force_sources
+        distance = torch.norm(d, dim=-1, keepdim=True)
+        forces = d / (1e-7 + distance**2)
+        target_vel = normalize(torch.mean(forces, dim=-2)) * self.target_speeds.view(-1, 1, 1)
+        
+        target_pos[..., 2].clamp_(0.2, self.MAX_XYZ[2]-0.2)
+        self.target_pos = target_pos # necessary?
+        self.target_vel = target_vel
+
+        # apply
+        actor_reset_ids = self.sim_actor_index["target"].flatten()
+        self.gym.set_actor_root_state_tensor_indexed(
+            self.sim, self.root_tensor, gymtorch.unwrap_tensor(actor_reset_ids), len(actor_reset_ids))
+
+        # visualize if has viewer
+        if self.viewer:
+            quadrotor_pos = self.quadrotor_pos[0]
+            target_pos = self.target_pos[0].expand_as(quadrotor_pos)
+            points = torch.cat([quadrotor_pos, target_pos], dim=-1).cpu().numpy()
+            self.viewer_lines.append((points, [[0, 1, 0]]*len(points)))
+            self.viewer_lines.append((torch.cat([target_pos, target_pos+target_vel[0]]).cpu().numpy(), [[0, 1, 0]]))
 
 class PredatorPrey(QuadrotorBase):
 
