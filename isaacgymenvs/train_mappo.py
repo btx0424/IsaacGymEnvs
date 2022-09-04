@@ -74,14 +74,14 @@ def main(cfg):
     runner = DroneRunner(config)
     if cfg.resume_id and run.resumed:
         logging.info(f"Resuming run {run.id}.")
-        wandb.restore("checkpoint.pt")
+        wandb.restore("checkpoint_best.pt")
         runner.restore()
     elif cfg.run_path:
         logging.info(f"Loading run from {cfg.run_path}.")
         api = wandb.Api()
         wandb.config.old_config = api.run(cfg.run_path).config
-        wandb.restore("checkpoint.pt", run_path=cfg.run_path)
-        runner.restore(reset_steps=True)
+        wandb.restore("checkpoint_best.pt", run_path=cfg.run_path)
+        runner.restore(reset_steps=True, tag="best")
     runner.run()
         
 if __name__ == "__main__":

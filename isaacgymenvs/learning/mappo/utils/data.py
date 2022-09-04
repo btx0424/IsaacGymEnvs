@@ -85,11 +85,10 @@ class LazyRolloutBuffer(TensorDict):
                 size = (*base_shape[:self.stack_dim], self.size, *base_shape[self.stack_dim:])
                 self[k] = torch.zeros(size, dtype=v.dtype, device=v.device)
             self._initiaized = True
-        else:
-            _step = self._step % self.size
-            idx = _step if step is None else torch.arange(_step, _step+step)%self.size
-            for k, v in dict.items():
-                self[k][idx] = v
+        _step = self._step % self.size
+        idx = _step if step is None else torch.arange(_step, _step+step)%self.size
+        for k, v in dict.items():
+            self[k][idx] = v
         self._step += step or 1
     
     def __len__(self) -> int:

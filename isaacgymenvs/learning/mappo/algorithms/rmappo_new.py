@@ -125,7 +125,8 @@ class MAPPOPolicy:
             values.append(value)
         values = torch.stack(values, 0)
         result_dict["values"] = values.mean(0)
-        if disagreement and len(values)>1: result_dict["value_stds"] = values.std(0)
+        if disagreement:
+            result_dict["value_stds"] = values.std(0)
         return TensorDict(result_dict)
     
     def update_actor(self, batch: Dict[str, torch.Tensor]) -> Dict[str, Any]:

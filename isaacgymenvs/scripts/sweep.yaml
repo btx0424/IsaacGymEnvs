@@ -9,26 +9,6 @@ metric:
   goal: maximize
 
 parameters:
-  task.targetSpeed:
-    values: [1, 2, 3, 4]
-  
-  seed:
-    values: [123, 456, 789]
-
-  # params.num_mini_batch:
-  #   values: [16, 32]
-  # params.ppo_epoch:
-  #   values: [10, 16]
-  # seed:
-  #   values: [31, 54]
-
-  # max_env_steps:
-  #   values:
-  #     - 500_000_000
-
-  # capture_video:
-  #   values:
-  #     - True
 
   wandb_name:
     values:

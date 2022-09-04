@@ -1,6 +1,7 @@
 from argparse import Namespace
 import logging
 from pprint import pprint
+from typing import Dict, Mapping
 import gym
 import hydra
 import isaacgym
@@ -27,6 +28,17 @@ def create_envs(cfg) -> MultiAgentVecTask:
         force_render=cfg.force_render,
     )
     return env
+
+def update_recursive(old: Mapping, new: Mapping):
+    changed = False
+    for k in new.keys():
+        if isinstance(old.get(k), Mapping) and isinstance(new[k], Mapping):
+            changed |= update_recursive(old[k], new[k])
+        elif old.get(k) != new[k]:
+            logging.warning(f"{k}: {old.get(k)} => {new[k]}")
+            old[k] = new[k]
+            changed = True
+    return changed
 
 @hydra.main(config_name="mappo", config_path="./cfg", version_base=None)
 def main(cfg):
@@ -64,7 +76,7 @@ def main(cfg):
     else:
         raise ValueError("Must provide a resume_id or run_path to eval!")
     
-    run.config.update(OmegaConf.to_container(cfg, resolve=True))
+    update_recursive(run.config, OmegaConf.to_container(cfg, resolve=True))
 
     envs: MultiAgentVecTask = create_envs(cfg)
     if cfg.capture_video:
@@ -85,6 +97,6 @@ def main(cfg):
     runner = DroneRunner(config)
     runner.restore(tag="best")
     runner.eval(cfg.eval_episodes, log=False, verbose=True)
-        
+
 if __name__ == "__main__":
     main()

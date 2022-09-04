@@ -37,6 +37,7 @@ graphics_device_id: ${cuda_id}
 # cl TODO: structure config files
 progress_speed: # [2.0, 0.2, 8.0]
 progress_threshold: 
+reward_weights: [1, 1, 10]
 
 params:
   # ppo
@@ -73,7 +74,7 @@ params:
   explored_ratio_threshold: 0.9
   gae_lambda: 0.95
   gain: 0.01
-  gamma: 0.99
+  gamma: 0.999
   huber_delta: 10.0
   ifi: 0.1
   influence_layer_N: 1

@@ -94,14 +94,18 @@ class TargetHard(QuadrotorBase):
             sample_idx = randperm[torch.arange(num_samples).reshape(done_envs, self.num_agents)%len(self.grid_avail)]
             start_positions = self.grid_centers[sample_idx]
         if target_speeds is None:
-            target_speeds = self.target_speed_dist.sample((done_envs, self.num_targets, 1))
+            target_speeds = self.target_speed_dist.sample((done_envs, ))
+            # if self.training():
+            #     target_speeds = self.target_speed_dist.sample((done_envs, ))
+            # else:
+            #     target_speeds = uniform((done_envs, ), 0, 4, self.device)
         self.root_positions[envs_done, self.drone_slice] = start_positions
         self.root_positions[envs_done, self.target_slice, 2] = self.MAX_XYZ[2] / 2
         self.root_linvels[envs_done, self.target_slice] = 0
         self.target_speeds[envs_done] = target_speeds.view(-1, 1, 1)
 
         self.tasks["start_positions"][envs_done] = start_positions
-        self.tasks["target_speeds"][envs_done] = target_speeds.mean(1).squeeze()
+        self.tasks["target_speeds"][envs_done] = target_speeds
         
     def compute_reward_and_done(self):
         pos = self.quadrotor_pos
@@ -126,20 +130,21 @@ class TargetHard(QuadrotorBase):
         
         self.reset_buf.zero_()
         # self.reset_buf[(target_distance > 3).all(-1)] = 1
-        self.reset_buf[pos[..., 2] < 0.1] = 1
-        self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
+        if self.training():
+            self.reset_buf[pos[..., 2] < 0.1] = 1
+            self.reset_buf[pos[..., 2] > self.MAX_XYZ[2]] = 1
         self.reset_buf[self.progress_buf >= self.max_episode_length - 1] = 1
         self._envs_done[:] = self.reset_buf.all(-1)
 
         cum_reward = self.cum_rew_buf.clone()
-        success = (self.captured_steps_buf / self.success_threshold)
+        success = (self.captured_steps_buf / self.success_threshold).clamp(0., 1.)
         self.extras["episode"].update({
             "reward_distance@predator": cum_reward[..., 0],
             "reward_collision@predator": cum_reward[..., 1],
             "reward_capture@predator": cum_reward[..., 2],
             "success@predator": success,
 
-            "target_speeds": self.target_speeds.clone(),
+            "target_speeds": self.target_speeds.clone().squeeze(),
             "length": self.progress_buf + 1,
         })
         self.tasks["success"][self.envs_done] = success[self.envs_done]

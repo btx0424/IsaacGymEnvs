@@ -68,17 +68,19 @@ class DroneRunner(Runner):
         self.save_interval = 200
         self.eval_episodes = cfg.eval_episodes
 
-        # CL config
-        self.use_cl = cfg.use_cl
-        self.progress_speed = cfg.progress_speed
-        self.progress_threshold = 2.0
-
         self.num_envs = cfg.num_envs
 
         self.device = cfg.rl_device
         all_args = config["all_args"]
 
         super().__init__(config)
+        # CL config
+        self.use_cl = cfg.use_cl
+        self.progress_speed = cfg.progress_speed
+        self.progress_threshold = 0.85
+        if self.progress_speed is not None:
+            self.envs.target_speed_dist.high.fill_(1.).mul_(self.progress_speed[0])
+            print(self.envs.target_speed_dist.sample((1000, )).mean())
 
         self.agents = self.envs.agent_types
         if len(self.agents) > 1:
@@ -109,6 +111,9 @@ class DroneRunner(Runner):
         self.env_steps_this_run = 0
         self.total_episodes = 0
         self.episodes_this_run = 0
+
+        reward_weights = cfg.get("reward_weights")
+        self.reward_weights = torch.tensor(reward_weights, device=self.device, dtype=torch.float32)
 
     def run(self):
         self.training = True
@@ -164,8 +169,8 @@ class DroneRunner(Runner):
 
         step_kwargs["on_reset"] = on_reset
 
-        self.envs.train()
         for iteration in range(self.max_iterations):
+            self.envs.train()
             iter_start = time.perf_counter()
             for agent_type, policy in self.policies.items():
                 policy.prep_rollout()
@@ -197,11 +202,13 @@ class DroneRunner(Runner):
                 self.log(train_infos)
 
             if self.eval_interval > 0 and iteration % self.eval_interval == 0:
-                eval_info = self.eval(self.eval_episodes, log=True, verbose=False)
-                if self.progress_speed is not None and eval_info["eval/success@predator"] > self.progress_threshold:
+                eval_infos = self.eval(self.eval_episodes, verbose=False)
+                table: pd.DataFrame = eval_infos.pop("table")
+                if self.progress_speed is not None and (table["success"].dropna() > self.progress_threshold).all():
                     start, step, end = self.progress_speed
                     self.envs.target_speed_dist = torch.distributions.Uniform(self.envs.target_speed_dist.low, min(self.envs.target_speed_dist.high+step, end))
                     logging.info(f"Increase target_speeds to be in range [{self.envs.target_speed_dist.low}, {self.envs.target_speed_dist.high}]")
+                self.log(eval_infos)
                 tensordict = self.envs.reset()
 
             if (
@@ -231,7 +238,7 @@ class DroneRunner(Runner):
             policy.prep_training()
             agent_batch = grouped[agent_type]
             # reward shaping TODO: do it somewhere else
-            agent_batch["rewards"] = agent_batch["rewards"].sum(-1, keepdim=True)
+            agent_batch["rewards"] = (agent_batch["rewards"] * self.reward_weights).sum(-1, keepdim=True)
             agent_train_info = policy.train_on_batch(TensorDict(**agent_batch, **others))
             train_infos.update({f"{agent_type}.{k}": v for k, v in agent_train_info.items()})
         return train_infos
@@ -270,7 +277,7 @@ class DroneRunner(Runner):
             self.total_env_steps = checkpoint["env_steps"]
 
     @torch.no_grad()
-    def eval(self, eval_episodes, log=True, verbose=False):
+    def eval(self, eval_episodes, verbose=False):
         stamp_str = f"Eval at {self.total_env_steps}(total)/{self.env_steps_this_run}(this run) steps."
         logging.info(stamp_str)
         for agent_type, policy in self.policies.items():
@@ -294,7 +301,6 @@ class DroneRunner(Runner):
                     episode_infos[k].extend(v.tolist())
                 tasks: TensorDict = envs.extras["task"][env_ids]
                 task_buffer.insert(tasks, step=len(env_ids))
-                assert (envs.extras["episode"][env_ids]["success@predator"] == tasks["success"]).all()
             return {}
         step_kwargs["on_reset"] = on_reset
 
@@ -303,22 +309,17 @@ class DroneRunner(Runner):
         eval_infos = {"env_step": self.total_env_steps}
         eval_infos.update(collect_episode_infos_(episode_infos, "eval"))
 
-        if len(task_buffer) > 0:
-            value_output = self.policies["predator"].value_op(task_buffer.rename(init_obs="obs"), disagreement=True).mean(1) # average over agents
-            critic_features = self.policies["predator"].critics[0].get_feature(task_buffer["init_obs"][:, 0]) # first critic, first agent ...
-
-            df = pd.DataFrame(task_buffer.select("success", "target_speeds", "collision").update(value_output).flatten().cpu().numpy())
-            tsne = manifold.TSNE()
-            embeddings = tsne.fit_transform(critic_features.cpu().numpy()) # [N, 2]
-            x, y = embeddings.T
-            eval_infos.update({
-                "success": px.scatter(x=x, y=y, color=df["success"]),
-                "target_speeds": px.scatter(x=x, y=y, color=df["target_speeds"]),
-                "value_stds": px.scatter(x=x, y=y, color=df["value_stds"]),
-                "success vs. target_speeds": px.scatter(df, x="target_speeds", y="success", size="value_stds", marginal_y="histogram", color="collision"),
-            })
-
+        
+        assert len(task_buffer) >= eval_episodes
+        value_output = self.policies["predator"].value_op(task_buffer.rename(init_obs="obs"), disagreement=True).mean(1) # average over agents
+        df = pd.DataFrame(task_buffer.select("success", "target_speeds").update(value_output).flatten().cpu().numpy())
+        df["bins"] = pd.cut(df["target_speeds"], np.linspace(0, 4, num=5))
+        eval_infos.update({
+            "success vs. target_speeds": px.scatter(df, x="target_speeds", y="success", size="value_stds", color="values", range_x=(-0.2, 4.2), range_y=(-0.1, 1.1)),
+            "avg_success vs. target_speeds": px.histogram(df, x="target_speeds", y="success", histfunc="avg", range_x=(0, 4), range_y=(0, 1.1)),
+            # "success on different intervals": px.histogram(df, x="success", color="bins", opacity=0.6, marginal="box", range_x=(-0.1, 1.1), range_y=(0, eval_episodes))
+        })
+        
+        eval_infos["table"] = df.groupby("bins")[["success"]].mean()
         task_buffer.clear()
-        if log:
-            self.log(eval_infos)
         return eval_infos
